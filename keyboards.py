@@ -8,9 +8,11 @@ def get_start_keyboard():
             InlineKeyboardButton(text="💱 NPR → INR", callback_data="exchange_npr_to_inr")
         ],
         [
-                InlineKeyboardButton(text="💰 Load Wallet", callback_data="load_wallet"),
-                InlineKeyboardButton(text="💼 Wallet Balance", callback_data="wallet_balance"),
-                InlineKeyboardButton(text="📊 Current Rate", callback_data="check_rate")
+            InlineKeyboardButton(text="💰 Load Wallet", callback_data="load_wallet"),
+            InlineKeyboardButton(text="💼 Wallet Balance", callback_data="wallet_balance"),
+        ],
+        [
+            InlineKeyboardButton(text="📊 Current Rate", callback_data="check_rate")
         ],
         [
             InlineKeyboardButton(text="📜 Transaction History", callback_data="transaction_history"),
