@@ -103,9 +103,15 @@ async def admin_restart(message: Message):
     if ok:
         # Attempt graceful restart of current process
         try:
-            import os, sys
-            await message.answer("♻️ Restarting bot process now...")
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+                import os, sys
+                # If running inside Docker/container, exit and let the supervisor restart
+                in_docker = os.getenv("IN_DOCKER", "0")
+                if in_docker == "1":
+                    await message.answer("♻️ Exiting process; container supervisor should restart the bot.")
+                    sys.exit(0)
+                else:
+                    await message.answer("♻️ Restarting bot process now...")
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
         except Exception as e:
             await message.answer(f"Restart failed: {e}")
 
@@ -389,6 +395,33 @@ async def check_rate(callback: CallbackQuery):
         parse_mode="HTML",
         reply_markup=get_back_button()
     )
+
+
+@router.callback_query(F.data == "wallet_balance")
+async def wallet_balance(callback: CallbackQuery):
+    """Show user's current wallet balances"""
+    user_id = callback.from_user.id
+
+    if is_user_banned(user_id):
+        await callback.answer(ERROR_MESSAGES["banned"], show_alert=True)
+        return
+
+    user_info = get_user_info(user_id)
+    if not user_info:
+        await callback.answer("⚠️ Profile not found.", show_alert=True)
+        return
+
+    inr_bal = format_currency(user_info.get("wallet_inr") or 0, "INR")
+    npr_bal = format_currency(user_info.get("wallet_npr") or 0, "NPR")
+
+    text = (
+        f"💼 <b>Your Wallet Balances</b>\n\n"
+        f"• 💵 INR: <b>{inr_bal}</b>\n"
+        f"• ₨ NPR: <b>{npr_bal}</b>\n\n"
+        "Use 'Load Wallet' to add funds if needed."
+    )
+
+    await callback.message.edit_text(text=text, parse_mode="HTML", reply_markup=get_load_wallet_keyboard())
 
 @router.callback_query(F.data == "transaction_history")
 async def show_transaction_history(callback: CallbackQuery):
