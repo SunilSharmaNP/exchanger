@@ -108,6 +108,3 @@ def get_back_button():
         [InlineKeyboardButton(text="🔙 Back", callback_data="back_to_start")]
     ])
     return keyboard
-
-
-
