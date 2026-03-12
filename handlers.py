@@ -4,7 +4,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from datetime import datetime
 from database import get_db_connection, init_database
-from config import BOT_TOKEN, ADMIN_IDS, SERVICE_FEE_PERCENTAGE
+from config import BOT_TOKEN, ADMIN_IDS, SERVICE_FEE_PERCENTAGE, BANNER_IMAGE_URL, PAYMENT_IMAGE_URL
 from keyboards import (
     get_start_keyboard, get_exchange_confirmation_keyboard,
     get_payment_keyboard, get_admin_approval_keyboard,
@@ -86,6 +86,29 @@ async def start_command(message: Message, state: FSMContext):
             reply_markup=get_start_keyboard()
         )
 
+
+@router.message(lambda msg: msg.text and msg.text.startswith("/restart"))
+async def admin_restart(message: Message):
+    """Admin command to update code from upstream and restart the bot"""
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        await message.answer("⚠️ Unauthorized.")
+        return
+
+    await message.answer("🔄 Starting update from upstream... This may take a few moments.")
+    from updater import restart_bot
+    ok, msg = await restart_bot()
+    await message.answer(msg)
+
+    if ok:
+        # Attempt graceful restart of current process
+        try:
+            import os, sys
+            await message.answer("♻️ Restarting bot process now...")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception as e:
+            await message.answer(f"Restart failed: {e}")
+
 # ============================================================================
 # EXCHANGE FLOW
 # ============================================================================
@@ -157,6 +180,36 @@ async def process_amount(message: Message, state: FSMContext):
     amount = result
     data = await state.get_data()
     exchange_type = data["exchange_type"]
+
+    # Check user's wallet balance before proceeding
+    user_id = message.from_user.id
+    user_info = get_user_info(user_id)
+    wallet_inr = float(user_info["wallet_inr"] or 0) if user_info else 0
+    wallet_npr = float(user_info["wallet_npr"] or 0) if user_info else 0
+
+    if exchange_type == "INR_TO_NPR":
+        if wallet_inr < amount:
+            await message.answer(
+                text=(f"⚠️ Insufficient INR wallet balance.\n\n"
+                      f"Requested: {format_currency(amount, 'INR')}\n"
+                      f"Your INR Wallet: {format_currency(wallet_inr, 'INR')}\n\n"
+                      "Please load your INR wallet before proceeding."),
+                parse_mode="HTML",
+                reply_markup=get_load_wallet_keyboard()
+            )
+            return
+    else:
+        # NPR_TO_INR
+        if wallet_npr < amount:
+            await message.answer(
+                text=(f"⚠️ Insufficient NPR wallet balance.\n\n"
+                      f"Requested: {format_currency(amount, 'NPR')}\n"
+                      f"Your NPR Wallet: {format_currency(wallet_npr, 'NPR')}\n\n"
+                      "Please load your NPR wallet before proceeding."),
+                parse_mode="HTML",
+                reply_markup=get_load_wallet_keyboard()
+            )
+            return
 
     # Get exchange rate
     rate = get_exchange_rate(exchange_type)
@@ -278,13 +331,9 @@ async def receive_transaction_id(message: Message, state: FSMContext):
     # Save to database
     from database import execute_db
 
-    execute_db("INSERT INTO exchange_requests (user_id, username, exchange_type, amount, exchange_rate, calculated_amount, service_fee, final_amount, transaction_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
+    request_id = execute_db("INSERT INTO exchange_requests (user_id, username, exchange_type, amount, exchange_rate, calculated_amount, service_fee, final_amount, transaction_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
         user_id, username, data["exchange_type"], data["amount"], data["exchange_rate"], data["calculated_amount"], data["service_fee"], data["final_amount"], transaction_id, "pending"
     ), commit=True)
-
-    # Retrieve last inserted id (sqlite specific)
-    rid = execute_db("SELECT last_insert_rowid()", fetchone=True)
-    request_id = rid[0] if rid else None
 
     # Confirm to user
     await message.answer(
@@ -457,6 +506,81 @@ async def load_wallet(callback: CallbackQuery):
         reply_markup=get_load_wallet_keyboard()
     )
 
+
+@router.callback_query(F.data == "load_inr")
+async def load_inr(callback: CallbackQuery, state: FSMContext):
+    """Start loading INR into wallet"""
+    user_id = callback.from_user.id
+    if is_user_banned(user_id):
+        await callback.answer(ERROR_MESSAGES["banned"], show_alert=True)
+        return
+
+    await state.set_state(WalletStates.entering_load_amount)
+    await state.update_data(load_currency="INR")
+    await callback.message.edit_text(text="💵 <b>Load INR</b>\n\nEnter amount to load:", parse_mode="HTML", reply_markup=get_back_button())
+
+
+@router.callback_query(F.data == "load_npr")
+async def load_npr(callback: CallbackQuery, state: FSMContext):
+    """Start loading NPR into wallet"""
+    user_id = callback.from_user.id
+    if is_user_banned(user_id):
+        await callback.answer(ERROR_MESSAGES["banned"], show_alert=True)
+        return
+
+    await state.set_state(WalletStates.entering_load_amount)
+    await state.update_data(load_currency="NPR")
+    await callback.message.edit_text(text="₨ <b>Load NPR</b>\n\nEnter amount to load:", parse_mode="HTML", reply_markup=get_back_button())
+
+
+@router.message(WalletStates.entering_load_amount)
+async def process_wallet_load_amount(message: Message, state: FSMContext):
+    """Process amount for wallet loading and send payment instructions"""
+    is_valid, result = validate_amount(message.text)
+    if not is_valid:
+        await message.answer(text=f"❌ {result}", parse_mode="HTML")
+        return
+
+    amount = result
+    data = await state.get_data()
+    load_currency = data.get("load_currency", "INR")
+    user_id = message.from_user.id
+    username = message.from_user.username or "Unknown"
+
+    # Save as a pending exchange_requests row (type LOAD_INR / LOAD_NPR)
+    exchange_type = "LOAD_INR" if load_currency == "INR" else "LOAD_NPR"
+    from database import execute_db
+
+    request_id = execute_db(
+        "INSERT INTO exchange_requests (user_id, username, exchange_type, amount, exchange_rate, calculated_amount, service_fee, final_amount, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (user_id, username, exchange_type, amount, 1.0, amount, 0.0, amount, 'pending'),
+        commit=True
+    )
+
+    # Send payment instructions
+    upi_id, esewa_id = get_payment_details()
+    payment_msg = PAYMENT_INSTRUCTIONS.format(upi_id=upi_id, esewa_id=esewa_id, user_id=user_id)
+
+    try:
+        await message.answer_photo(photo=BANNER_IMAGE_URL, caption=payment_msg, parse_mode="HTML", reply_markup=get_payment_keyboard())
+    except Exception:
+        await message.answer(text=payment_msg, parse_mode="HTML", reply_markup=get_payment_keyboard())
+
+    # Notify admin about new wallet load request
+    notify_data = {
+        "exchange_type": exchange_type,
+        "amount": amount,
+        "exchange_rate": 1.0,
+        "calculated_amount": amount,
+        "service_fee": 0.0,
+        "final_amount": amount,
+        "from_currency": load_currency,
+        "to_currency": load_currency
+    }
+
+    await notify_admin(user_id, username, notify_data, transaction_id="-", request_id=request_id, message=message)
+    await state.clear()
+
 # ============================================================================
 # BACK TO START
 # ============================================================================
@@ -576,10 +700,10 @@ async def admin_approve(callback: CallbackQuery):
     user_id = row[0]
     final_amount = row[2]
 
-        # Update request status (with retries)
-        from database import execute_db
-        execute_db("UPDATE exchange_requests SET status = 'approved', approved_at = CURRENT_TIMESTAMP WHERE request_id = ?", (request_id,), commit=True)
-        execute_db("INSERT INTO admin_logs (admin_id, action, request_id, details) VALUES (?, ?, ?, ?)", (admin_id, 'approve', request_id, 'Approved by admin'), commit=True)
+    # Update request status (with retries)
+    from database import execute_db
+    execute_db("UPDATE exchange_requests SET status = 'approved', approved_at = CURRENT_TIMESTAMP WHERE request_id = ?", (request_id,), commit=True)
+    execute_db("INSERT INTO admin_logs (admin_id, action, request_id, details) VALUES (?, ?, ?, ?)", (admin_id, 'approve', request_id, 'Approved by admin'), commit=True)
 
     # Notify user
     from aiogram import Bot
@@ -598,26 +722,26 @@ async def admin_approve(callback: CallbackQuery):
     conn.commit()
     conn.close()
     
-        # Referral reward: if user was referred, credit referrer a bonus
-        try:
-            ref = execute_db("SELECT referred_by FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-            if ref and ref[0]:
-                referrer_id = ref[0]
-                bonus_str = execute_db("SELECT setting_value FROM admin_settings WHERE setting_name = 'referral_bonus_percent'", fetchone=True)
-                bonus_percent = float(bonus_str[0]) if bonus_str else 1.0
-                bonus_amount = float(final_amount) * (bonus_percent / 100.0)
-                # Credit to referrer's NPR wallet (assume payout currency)
-                execute_db("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?", (bonus_amount, referrer_id), commit=True)
-                execute_db("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (referrer_id, request_id, 'referral_bonus', bonus_amount, 'NPR', 'completed'), commit=True)
-                # Notify referrer
-                from aiogram import Bot
-                bot = Bot(token=BOT_TOKEN)
-                try:
-                    await bot.send_message(chat_id=referrer_id, text=f"🎉 You received a referral bonus of ₨{bonus_amount:,.2f} for referring @{row[1]}")
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"Referral reward failed: {e}")
+    # Referral reward: if user was referred, credit referrer a bonus
+    try:
+        ref = execute_db("SELECT referred_by FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+        if ref and ref[0]:
+            referrer_id = ref[0]
+            bonus_str = execute_db("SELECT setting_value FROM admin_settings WHERE setting_name = 'referral_bonus_percent'", fetchone=True)
+            bonus_percent = float(bonus_str[0]) if bonus_str else 1.0
+            bonus_amount = float(final_amount) * (bonus_percent / 100.0)
+            # Credit to referrer's NPR wallet (assume payout currency)
+            execute_db("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?", (bonus_amount, referrer_id), commit=True)
+            execute_db("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (referrer_id, request_id, 'referral_bonus', bonus_amount, 'NPR', 'completed'), commit=True)
+            # Notify referrer
+            from aiogram import Bot
+            bot = Bot(token=BOT_TOKEN)
+            try:
+                await bot.send_message(chat_id=referrer_id, text=f"🎉 You received a referral bonus of ₨{bonus_amount:,.2f} for referring @{row[1]}")
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"Referral reward failed: {e}")
 
     # Send completion message to user
     from datetime import datetime
