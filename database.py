@@ -146,8 +146,11 @@ def execute_db(query, params=(), fetchone=False, fetchall=False, commit=False, r
             cursor = conn.cursor()
             cursor.execute(query, params)
             result = None
+            # If caller asked to commit, do it. For INSERTs return lastrowid when no fetch requested.
             if commit:
                 conn.commit()
+                if not fetchone and not fetchall:
+                    result = cursor.lastrowid
             if fetchone:
                 result = cursor.fetchone()
             elif fetchall:
