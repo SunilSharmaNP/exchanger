@@ -9,10 +9,11 @@ def get_start_keyboard():
         ],
         [
             InlineKeyboardButton(text="💰 Load Wallet", callback_data="load_wallet"),
-            InlineKeyboardButton(text="💼 Wallet Balance", callback_data="wallet_balance"),
+            InlineKeyboardButton(text="📊 Current Rate", callback_data="check_rate")
         ],
         [
-            InlineKeyboardButton(text="📊 Current Rate", callback_data="check_rate")
+            InlineKeyboardButton(text="💼 Wallet Balance", callback_data="wallet_balance"),
+            InlineKeyboardButton(text="💸 Withdraw", callback_data="withdraw"),
         ],
         [
             InlineKeyboardButton(text="📜 Transaction History", callback_data="transaction_history"),
