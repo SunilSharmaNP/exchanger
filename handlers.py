@@ -343,11 +343,38 @@ async def receive_transaction_id(message: Message, state: FSMContext):
         user_id, username, data["exchange_type"], data["amount"], data["exchange_rate"], data["calculated_amount"], data["service_fee"], data["final_amount"], transaction_id, "pending"
     ), commit=True)
 
-    # Confirm to user
+    # If this is a currency exchange (not a wallet load), reserve (deduct)
+    # the source wallet amount and record a 'debit' transaction with status 'held'.
+    if data.get("exchange_type") in ("INR_TO_NPR", "NPR_TO_INR"):
+        try:
+            conn2 = get_db_connection()
+            cur2 = conn2.cursor()
+            src_amount = float(data.get("amount", 0))
+            if data.get("exchange_type") == "INR_TO_NPR":
+                cur2.execute("UPDATE users SET wallet_inr = COALESCE(wallet_inr,0) - ? WHERE user_id = ? AND COALESCE(wallet_inr,0) >= ?", (src_amount, user_id, src_amount))
+                src_currency = 'INR'
+            else:
+                cur2.execute("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) - ? WHERE user_id = ? AND COALESCE(wallet_npr,0) >= ?", (src_amount, user_id, src_amount))
+                src_currency = 'NPR'
+
+            if cur2.rowcount == 0:
+                conn2.close()
+                await message.answer("⚠️ Could not reserve funds from your wallet (possible race). Please try again.")
+                return
+
+            cur2.execute("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (user_id, request_id, 'debit', src_amount, src_currency, 'held'))
+            conn2.commit()
+            conn2.close()
+        except Exception as e:
+            print(f"Error reserving funds: {e}")
+
+    # Confirm to user with improved message including request id
     await message.answer(
-        text=SUCCESS_MESSAGES["payment_received"] + "\n\n" +
-             "Your request is now being reviewed by our admin team.\n" +
-             "You will receive a notification once it's processed.",
+        text=(f"✅ Payment details received and request #{request_id} created.\n\n"
+              f"• Request: {get_exchange_type_display(data.get('exchange_type'))}\n"
+              f"• Amount: {format_currency(data.get('amount',0), data.get('from_currency'))}\n"
+              f"• Expected: {format_currency(data.get('final_amount',0), data.get('to_currency'))}\n\n"
+              "Your request is now with our admin team for verification. You will be notified when the payout is completed."),
         parse_mode="HTML",
         reply_markup=get_start_keyboard()
     )
@@ -764,7 +791,7 @@ async def admin_approve(callback: CallbackQuery):
     from aiogram import Bot
     bot = Bot(token=BOT_TOKEN)
     try:
-        await bot.send_message(chat_id=user_id, text=APPROVED_MESSAGE.format(final_amount=final_amount, to_currency=to_currency), parse_mode="HTML")
+        await bot.send_message(chat_id=user_id, text=APPROVED_MESSAGE.format(request_id=request_id, final_amount=final_amount, to_currency=to_currency), parse_mode="HTML")
     except Exception as e:
         print(f"Error notifying user on approve: {e}")
 
@@ -784,6 +811,14 @@ async def admin_approve(callback: CallbackQuery):
         cursor.execute("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (user_id, request_id, 'wallet_load', final_amount, payout_currency, 'completed'))
         cursor.execute("INSERT INTO admin_logs (admin_id, action, request_id, details) VALUES (?, ?, ?, ?)", (admin_id, 'wallet_credit', request_id, 'Wallet load credited'))
         conn.commit()
+        # Notify user that load is completed
+        try:
+            from aiogram import Bot
+            bot = Bot(token=BOT_TOKEN)
+            timestamp = datetime.now().strftime("%d/%m/%Y %H:%M")
+            await bot.send_message(chat_id=user_id, text=COMPLETED_MESSAGE.format(sent_amount=final_amount, from_currency=from_currency, received_amount=final_amount, to_currency=to_currency, service_fee='0', request_id=request_id, timestamp=timestamp), parse_mode="HTML")
+        except Exception:
+            pass
         conn.close()
     else:
         # For standard exchanges: mark approved only and provide admin a 'Mark Paid' button
@@ -822,15 +857,7 @@ async def admin_approve(callback: CallbackQuery):
         except Exception as e:
             print(f"Referral reward failed: {e}")
 
-    # Send completion message to user
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%d/%m/%Y %H:%M")
-    try:
-        await bot.send_message(chat_id=user_id, text=COMPLETED_MESSAGE.format(sent_amount=final_amount, from_currency=from_currency, received_amount=final_amount, to_currency=to_currency, service_fee='0', request_id=request_id, timestamp=timestamp), parse_mode="HTML")
-    except Exception as e:
-        print(f"Error sending completion message: {e}")
-
-    await callback.answer("✅ Request approved and processed.")
+    await callback.answer("✅ Request approved.")
     await callback.message.edit_reply_markup(reply_markup=None)
 
 
@@ -888,6 +915,16 @@ async def admin_mark_paid(callback: CallbackQuery):
     cursor.execute("INSERT INTO admin_logs (admin_id, action, request_id, details) VALUES (?, ?, ?, ?)", (admin_id, 'paid', request_id, 'Admin confirmed payout'))
     conn.commit()
     conn.close()
+
+    # finalize any held debit transaction for this request
+    try:
+        conn2 = get_db_connection()
+        cur2 = conn2.cursor()
+        cur2.execute("UPDATE transactions SET status = 'completed' WHERE exchange_request_id = ? AND transaction_type = 'debit' AND status = 'held'", (request_id,))
+        conn2.commit()
+        conn2.close()
+    except Exception as e:
+        print(f"Failed to finalize debit transaction: {e}")
 
     # referral reward (if any)
     try:
@@ -953,6 +990,26 @@ async def admin_reject(callback: CallbackQuery, state: FSMContext):
     cursor.execute("INSERT INTO admin_logs (admin_id, action, request_id, details) VALUES (?, ?, ?, ?)", (admin_id, 'reject', request_id, 'Rejected by admin'))
     conn.commit()
     conn.close()
+
+    # If there was a held debit for this request, refund it to the user
+    try:
+        conn2 = get_db_connection()
+        cur2 = conn2.cursor()
+        cur2.execute("SELECT amount, currency, status FROM transactions WHERE exchange_request_id = ? AND transaction_type = 'debit'", (request_id,))
+        drow = cur2.fetchone()
+        if drow and drow[2] == 'held':
+            amt, cur = float(drow[0]), drow[1]
+            if cur == 'INR':
+                cur2.execute("UPDATE users SET wallet_inr = COALESCE(wallet_inr,0) + ? WHERE user_id = ?", (amt, user_id))
+            else:
+                cur2.execute("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?", (amt, user_id))
+            # mark debit as refunded and insert a refund transaction
+            cur2.execute("UPDATE transactions SET status = 'refunded' WHERE exchange_request_id = ? AND transaction_type = 'debit'", (request_id,))
+            cur2.execute("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (user_id, request_id, 'refund', amt, cur, 'completed'))
+            conn2.commit()
+        conn2.close()
+    except Exception as e:
+        print(f"Refund on reject failed: {e}")
 
     from aiogram import Bot
     bot = Bot(token=BOT_TOKEN)
