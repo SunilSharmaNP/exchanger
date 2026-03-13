@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from datetime import datetime
@@ -300,7 +300,8 @@ async def payment_done(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.answer(
         text="📸 <b>Upload Payment Screenshot</b>\n\nPlease send a screenshot of your payment confirmation.",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=get_back_button()
     )
 
 @router.message(ExchangeStates.uploading_screenshot)
@@ -317,7 +318,8 @@ async def receive_screenshot(message: Message, state: FSMContext):
     await state.set_state(ExchangeStates.uploading_transaction_id)
     await message.answer(
         text="📋 <b>Transaction ID</b>\n\nPlease send your transaction ID (from payment confirmation).",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=get_back_button()
     )
 
 @router.message(ExchangeStates.uploading_transaction_id)
@@ -769,7 +771,7 @@ async def admin_approve(callback: CallbackQuery):
     # Auto payout / credit handling
     conn = get_db_connection()
     cursor = conn.cursor()
-    # If this is a wallet load, credit the user's wallet instead of payout
+    # If this is a wallet load, credit the user's wallet immediately
     if exchange_type in ('LOAD_INR', 'LOAD_NPR'):
         # mark completed
         cursor.execute("UPDATE exchange_requests SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE request_id = ?", (request_id,))
@@ -784,11 +786,15 @@ async def admin_approve(callback: CallbackQuery):
         conn.commit()
         conn.close()
     else:
-        # standard exchange payout simulation
-        cursor.execute("UPDATE exchange_requests SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE request_id = ?", (request_id,))
-        cursor.execute("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (user_id, request_id, 'payout', final_amount, payout_currency, 'completed'))
-        cursor.execute("INSERT INTO admin_logs (admin_id, action, request_id, details) VALUES (?, ?, ?, ?)", (admin_id, 'payout', request_id, 'Auto payout processed'))
-        conn.commit()
+        # For standard exchanges: mark approved only and provide admin a 'Mark Paid' button
+        # so admin can confirm they have sent the exchanged funds to the user.
+        execute_db("UPDATE exchange_requests SET status = 'approved', approved_at = CURRENT_TIMESTAMP WHERE request_id = ?", (request_id,), commit=True)
+        # send admin a quick action message to mark paid
+        try:
+            mark_paid_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Mark Paid", callback_data=f"admin_paid_{request_id}"), InlineKeyboardButton(text="❌ Reject", callback_data=f"admin_reject_{request_id}")]])
+            await bot.send_message(chat_id=admin_id, text=f"Request #{request_id} approved. Use the button below once you've sent the payment to the user.", reply_markup=mark_paid_kb)
+        except Exception:
+            pass
         conn.close()
 
     # Referral reward: only for exchanges (not wallet loads)
@@ -825,6 +831,101 @@ async def admin_approve(callback: CallbackQuery):
         print(f"Error sending completion message: {e}")
 
     await callback.answer("✅ Request approved and processed.")
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("admin_paid_"))
+async def admin_mark_paid(callback: CallbackQuery):
+    """Admin confirms they've sent payment to user — finalize payout and update wallet."""
+    admin_id = callback.from_user.id
+    if admin_id not in ADMIN_IDS:
+        await callback.answer("⚠️ Unauthorized.", show_alert=True)
+        return
+
+    request_id = int(callback.data.split("_")[-1])
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, username, exchange_type, final_amount, status FROM exchange_requests WHERE request_id = ?", (request_id,))
+    row = cursor.fetchone()
+    if not row:
+        await callback.answer("⚠️ Request not found.", show_alert=True)
+        conn.close()
+        return
+
+    user_id = row[0]
+    username = row[1]
+    exchange_type = row[2]
+    final_amount = row[3]
+    status = row[4]
+
+    if status != 'approved':
+        await callback.answer("⚠️ Request is not in approved state.", show_alert=True)
+        conn.close()
+        return
+
+    # finalize payout: mark completed, update user's wallet, record transaction
+    if exchange_type == 'INR_TO_NPR':
+        # user should receive NPR
+        cursor.execute("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?", (final_amount, user_id))
+        payout_currency = 'NPR'
+        from_currency = 'INR'
+        to_currency = 'NPR'
+    elif exchange_type == 'NPR_TO_INR':
+        cursor.execute("UPDATE users SET wallet_inr = COALESCE(wallet_inr,0) + ? WHERE user_id = ?", (final_amount, user_id))
+        payout_currency = 'INR'
+        from_currency = 'NPR'
+        to_currency = 'INR'
+    else:
+        # fallback — credit NPR
+        cursor.execute("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?", (final_amount, user_id))
+        payout_currency = 'NPR'
+        from_currency = 'INR'
+        to_currency = 'NPR'
+
+    cursor.execute("UPDATE exchange_requests SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE request_id = ?", (request_id,))
+    cursor.execute("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (user_id, request_id, 'payout', final_amount, payout_currency, 'completed'))
+    cursor.execute("INSERT INTO admin_logs (admin_id, action, request_id, details) VALUES (?, ?, ?, ?)", (admin_id, 'paid', request_id, 'Admin confirmed payout'))
+    conn.commit()
+    conn.close()
+
+    # referral reward (if any)
+    try:
+        ref = execute_db("SELECT referred_by FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+        if ref and ref[0]:
+            referrer_id = ref[0]
+            bonus_str = execute_db("SELECT setting_value FROM admin_settings WHERE setting_name = 'referral_bonus_percent'", fetchone=True)
+            bonus_percent = float(bonus_str[0]) if bonus_str else 1.0
+            bonus_amount = float(final_amount) * (bonus_percent / 100.0)
+            if payout_currency == 'NPR':
+                execute_db("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?", (bonus_amount, referrer_id), commit=True)
+            else:
+                execute_db("UPDATE users SET wallet_inr = COALESCE(wallet_inr,0) + ? WHERE user_id = ?", (bonus_amount, referrer_id), commit=True)
+            execute_db("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (referrer_id, request_id, 'referral_bonus', bonus_amount, payout_currency, 'completed'), commit=True)
+            try:
+                from aiogram import Bot
+                bot = Bot(token=BOT_TOKEN)
+                await bot.send_message(chat_id=referrer_id, text=f"🎉 You received a referral bonus of {payout_currency}{bonus_amount:,.2f} for referring @{username}")
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"Referral reward failed on paid: {e}")
+
+    # notify user and admin
+    from aiogram import Bot
+    bot = Bot(token=BOT_TOKEN)
+    try:
+        timestamp = datetime.now().strftime("%d/%m/%Y %H:%M")
+        await bot.send_message(chat_id=user_id, text=COMPLETED_MESSAGE.format(sent_amount=final_amount, from_currency=from_currency, received_amount=final_amount, to_currency=to_currency, service_fee='0', request_id=request_id, timestamp=timestamp), parse_mode="HTML")
+    except Exception:
+        pass
+
+    try:
+        await bot.send_message(chat_id=admin_id, text=f"✅ Marked request #{request_id} as PAID to user @{username}.")
+    except Exception:
+        pass
+
+    await callback.answer("✅ Marked as paid and wallet updated.")
     await callback.message.edit_reply_markup(reply_markup=None)
 
 
@@ -914,6 +1015,22 @@ async def admin_send_message_to_user(message: Message, state: FSMContext):
         await message.answer(f"⚠️ Failed to send message: {e}")
 
     await state.clear()
+
+
+@router.callback_query(F.data == "back_to_admin")
+async def back_to_admin(callback: CallbackQuery):
+    """Return to admin menu (for admin users)."""
+    admin_id = callback.from_user.id
+    if admin_id not in ADMIN_IDS:
+        await callback.answer("⚠️ Unauthorized.", show_alert=True)
+        return
+
+    try:
+        await callback.message.edit_text("<b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_admin_menu_keyboard())
+    except Exception:
+        # fallback to sending message
+        await callback.message.answer("<b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_admin_menu_keyboard())
+    await callback.answer()
 
 
 @router.callback_query(F.data == "admin_stats")
@@ -1089,3 +1206,183 @@ async def admin_broadcast_send(message: Message, state: FSMContext):
 
     await message.answer(f"📣 Broadcast sent to {sent} users.")
     await state.clear()
+
+
+@router.message(lambda msg: msg.text and msg.text.startswith("/credit"))
+async def admin_credit(message: Message):
+    """Admin command to add or set a user's wallet balance.
+
+    Usage: /credit add|set <user_id|@username> <INR|NPR> <amount>
+    Examples:
+      /credit add 123456789 INR 1000
+      /credit set @alice NPR 500
+    """
+    admin_id = message.from_user.id
+    if admin_id not in ADMIN_IDS:
+        await message.answer("⚠️ Unauthorized.")
+        return
+
+    parts = message.text.strip().split()
+    if len(parts) != 5:
+        await message.answer("❌ Invalid format. Use: /credit add|set <user_id|@username> <INR|NPR> <amount>")
+        return
+
+    _, action, target, currency, amt_str = parts
+    action = action.lower()
+    currency = currency.upper()
+    if action not in ("add", "set"):
+        await message.answer("❌ Action must be 'add' or 'set'.")
+        return
+    if currency not in ("INR", "NPR"):
+        await message.answer("❌ Currency must be INR or NPR.")
+        return
+
+    try:
+        amount = float(amt_str)
+        if amount <= 0:
+            raise ValueError()
+    except Exception:
+        await message.answer("❌ Amount must be a positive number.")
+        return
+
+    # Resolve target user id
+    target_user_id = None
+    if target.startswith("@"):
+        uname = target[1:]
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users WHERE username = ?", (uname,))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            await message.answer(f"⚠️ User with username @{uname} not found in database.")
+            return
+        target_user_id = row[0]
+    else:
+        try:
+            target_user_id = int(target)
+        except Exception:
+            await message.answer("❌ Invalid user identifier. Use numeric user_id or @username.")
+            return
+
+    from database import execute_db
+
+    # Apply update
+    if currency == 'INR':
+        if action == 'add':
+            execute_db("UPDATE users SET wallet_inr = COALESCE(wallet_inr,0) + ? WHERE user_id = ?", (amount, target_user_id), commit=True)
+            detail = f"Admin added {amount} INR to user {target_user_id}"
+        else:
+            execute_db("UPDATE users SET wallet_inr = ? WHERE user_id = ?", (amount, target_user_id), commit=True)
+            detail = f"Admin set INR wallet to {amount} for user {target_user_id}"
+        tx_currency = 'INR'
+    else:
+        if action == 'add':
+            execute_db("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?", (amount, target_user_id), commit=True)
+            detail = f"Admin added {amount} NPR to user {target_user_id}"
+        else:
+            execute_db("UPDATE users SET wallet_npr = ? WHERE user_id = ?", (amount, target_user_id), commit=True)
+            detail = f"Admin set NPR wallet to {amount} for user {target_user_id}"
+        tx_currency = 'NPR'
+
+    # Record transaction and admin log
+    execute_db("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (target_user_id, None, 'admin_credit', amount, tx_currency, 'completed'), commit=True)
+    execute_db("INSERT INTO admin_logs (admin_id, action, request_id, details) VALUES (?, ?, ?, ?)", (admin_id, 'admin_credit', None, detail), commit=True)
+
+    # Fetch new balance
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT wallet_inr, wallet_npr FROM users WHERE user_id = ?", (target_user_id,))
+    bal = cur.fetchone()
+    conn.close()
+    inr_bal = bal[0] or 0
+    npr_bal = bal[1] or 0
+
+    # Notify admin
+    await message.answer(f"✅ {detail}\n\nNew balances:\nINR: {format_currency(inr_bal, 'INR')}\nNPR: {format_currency(npr_bal, 'NPR')}")
+
+    # Notify user
+    from aiogram import Bot
+    bot = Bot(token=BOT_TOKEN)
+    try:
+        await bot.send_message(chat_id=target_user_id, text=f"🔔 Admin updated your wallet: {detail}\n\nNew balances:\nINR: {format_currency(inr_bal, 'INR')}\nNPR: {format_currency(npr_bal, 'NPR')}")
+    except Exception:
+        pass
+
+
+@router.message(lambda msg: msg.text and msg.text.startswith("/balance"))
+async def admin_balance(message: Message):
+    """Admin command to query a user's wallet balances.
+
+    Usage: /balance <user_id|@username>
+    Example: /balance @alice
+    """
+    admin_id = message.from_user.id
+    if admin_id not in ADMIN_IDS:
+        await message.answer("⚠️ Unauthorized.")
+        return
+
+    parts = message.text.strip().split()
+    if len(parts) != 2:
+        await message.answer("❌ Invalid format. Use: /balance <user_id|@username>")
+        return
+
+    target = parts[1]
+    target_user_id = None
+    if target.startswith("@"):
+        uname = target[1:]
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users WHERE username = ?", (uname,))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            await message.answer(f"⚠️ User with username @{uname} not found.")
+            return
+        target_user_id = row[0]
+    else:
+        try:
+            target_user_id = int(target)
+        except Exception:
+            await message.answer("❌ Invalid user identifier. Use numeric user_id or @username.")
+            return
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT username, wallet_inr, wallet_npr FROM users WHERE user_id = ?", (target_user_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        await message.answer("⚠️ User not found in database.")
+        return
+
+    username, wallet_inr, wallet_npr = row[0], row[1] or 0, row[2] or 0
+    await message.answer(f"👤 @{username} (ID: {target_user_id})\n\n💵 INR: {format_currency(wallet_inr, 'INR')}\n₨ NPR: {format_currency(wallet_npr, 'NPR')}")
+
+
+# Register bot commands on startup so Telegram shows them automatically
+from aiogram.types import BotCommand
+from aiogram import Bot as AiogramBot
+
+
+@router.startup()
+async def set_bot_commands_on_startup():
+    commands = [
+        BotCommand(command="start", description="Show start menu"),
+        BotCommand(command="menu", description="Open main menu"),
+        BotCommand(command="help", description="Show help and commands"),
+        BotCommand(command="profile", description="Show your profile"),
+        BotCommand(command="wallet", description="Show wallet balances"),
+        BotCommand(command="load", description="Load wallet funds"),
+        BotCommand(command="history", description="Show recent transactions"),
+        BotCommand(command="admin", description="Open admin panel (admins only)"),
+        BotCommand(command="credit", description="Admin: add/set user wallet (admins only)"),
+        BotCommand(command="balance", description="Admin: view user balances (admins only)"),
+        BotCommand(command="restart", description="Admin: update and restart the bot (admins only)"),
+    ]
+
+    try:
+        bot = AiogramBot(token=BOT_TOKEN)
+        await bot.set_my_commands(commands)
+    except Exception as e:
+        print(f"Failed to set bot commands: {e}")
