@@ -718,7 +718,7 @@ async def admin_approve(callback: CallbackQuery):
     request_id = int(callback.data.split("_")[-1])
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, username, final_amount, status FROM exchange_requests WHERE request_id = ?", (request_id,))
+    cursor.execute("SELECT user_id, username, exchange_type, final_amount, status FROM exchange_requests WHERE request_id = ?", (request_id,))
     row = cursor.fetchone()
     if not row:
         await callback.answer("⚠️ Request not found.", show_alert=True)
@@ -726,60 +726,105 @@ async def admin_approve(callback: CallbackQuery):
         return
 
     user_id = row[0]
-    final_amount = row[2]
+    username = row[1]
+    exchange_type = row[2]
+    final_amount = row[3]
+    status = row[4]
 
-    # Update request status (with retries)
+    # Update request status (with retries) and log approval
     from database import execute_db
     execute_db("UPDATE exchange_requests SET status = 'approved', approved_at = CURRENT_TIMESTAMP WHERE request_id = ?", (request_id,), commit=True)
     execute_db("INSERT INTO admin_logs (admin_id, action, request_id, details) VALUES (?, ?, ?, ?)", (admin_id, 'approve', request_id, 'Approved by admin'), commit=True)
 
-    # Notify user
+    # Determine currency mapping for messages and transactions
+    if exchange_type == 'INR_TO_NPR':
+        payout_currency = 'NPR'
+        from_currency = 'INR'
+        to_currency = 'NPR'
+    elif exchange_type == 'NPR_TO_INR':
+        payout_currency = 'INR'
+        from_currency = 'NPR'
+        to_currency = 'INR'
+    elif exchange_type == 'LOAD_INR':
+        payout_currency = 'INR'
+        from_currency = 'INR'
+        to_currency = 'INR'
+    elif exchange_type == 'LOAD_NPR':
+        payout_currency = 'NPR'
+        from_currency = 'NPR'
+        to_currency = 'NPR'
+    else:
+        payout_currency = 'NPR'
+        from_currency = 'INR'
+        to_currency = 'NPR'
+
+    # Notify user about approval
     from aiogram import Bot
     bot = Bot(token=BOT_TOKEN)
     try:
-        await bot.send_message(chat_id=user_id, text=APPROVED_MESSAGE.format(final_amount=final_amount, to_currency='NPR'), parse_mode="HTML")
+        await bot.send_message(chat_id=user_id, text=APPROVED_MESSAGE.format(final_amount=final_amount, to_currency=to_currency), parse_mode="HTML")
     except Exception as e:
         print(f"Error notifying user on approve: {e}")
 
-    # Auto payout simulation: mark as completed and create transaction
+    # Auto payout / credit handling
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE exchange_requests SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE request_id = ?", (request_id,))
-    cursor.execute("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (user_id, request_id, 'payout', final_amount, 'NPR', 'completed'))
-    cursor.execute("INSERT INTO admin_logs (admin_id, action, request_id, details) VALUES (?, ?, ?, ?)", (admin_id, 'payout', request_id, 'Auto payout processed'))
-    conn.commit()
-    conn.close()
-    
-    # Referral reward: if user was referred, credit referrer a bonus
-    try:
-        ref = execute_db("SELECT referred_by FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-        if ref and ref[0]:
-            referrer_id = ref[0]
-            bonus_str = execute_db("SELECT setting_value FROM admin_settings WHERE setting_name = 'referral_bonus_percent'", fetchone=True)
-            bonus_percent = float(bonus_str[0]) if bonus_str else 1.0
-            bonus_amount = float(final_amount) * (bonus_percent / 100.0)
-            # Credit to referrer's NPR wallet (assume payout currency)
-            execute_db("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?", (bonus_amount, referrer_id), commit=True)
-            execute_db("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (referrer_id, request_id, 'referral_bonus', bonus_amount, 'NPR', 'completed'), commit=True)
-            # Notify referrer
-            from aiogram import Bot
-            bot = Bot(token=BOT_TOKEN)
-            try:
-                await bot.send_message(chat_id=referrer_id, text=f"🎉 You received a referral bonus of ₨{bonus_amount:,.2f} for referring @{row[1]}")
-            except Exception:
-                pass
-    except Exception as e:
-        print(f"Referral reward failed: {e}")
+    # If this is a wallet load, credit the user's wallet instead of payout
+    if exchange_type in ('LOAD_INR', 'LOAD_NPR'):
+        # mark completed
+        cursor.execute("UPDATE exchange_requests SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE request_id = ?", (request_id,))
+        # credit wallet
+        if exchange_type == 'LOAD_INR':
+            cursor.execute("UPDATE users SET wallet_inr = COALESCE(wallet_inr,0) + ? WHERE user_id = ?", (final_amount, user_id))
+        else:
+            cursor.execute("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?", (final_amount, user_id))
+        # record transaction
+        cursor.execute("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (user_id, request_id, 'wallet_load', final_amount, payout_currency, 'completed'))
+        cursor.execute("INSERT INTO admin_logs (admin_id, action, request_id, details) VALUES (?, ?, ?, ?)", (admin_id, 'wallet_credit', request_id, 'Wallet load credited'))
+        conn.commit()
+        conn.close()
+    else:
+        # standard exchange payout simulation
+        cursor.execute("UPDATE exchange_requests SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE request_id = ?", (request_id,))
+        cursor.execute("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (user_id, request_id, 'payout', final_amount, payout_currency, 'completed'))
+        cursor.execute("INSERT INTO admin_logs (admin_id, action, request_id, details) VALUES (?, ?, ?, ?)", (admin_id, 'payout', request_id, 'Auto payout processed'))
+        conn.commit()
+        conn.close()
+
+    # Referral reward: only for exchanges (not wallet loads)
+    if exchange_type not in ('LOAD_INR', 'LOAD_NPR'):
+        try:
+            ref = execute_db("SELECT referred_by FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+            if ref and ref[0]:
+                referrer_id = ref[0]
+                bonus_str = execute_db("SELECT setting_value FROM admin_settings WHERE setting_name = 'referral_bonus_percent'", fetchone=True)
+                bonus_percent = float(bonus_str[0]) if bonus_str else 1.0
+                bonus_amount = float(final_amount) * (bonus_percent / 100.0)
+                # Credit to referrer's wallet in payout currency
+                if payout_currency == 'NPR':
+                    execute_db("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?", (bonus_amount, referrer_id), commit=True)
+                else:
+                    execute_db("UPDATE users SET wallet_inr = COALESCE(wallet_inr,0) + ? WHERE user_id = ?", (bonus_amount, referrer_id), commit=True)
+                execute_db("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (referrer_id, request_id, 'referral_bonus', bonus_amount, payout_currency, 'completed'), commit=True)
+                # Notify referrer
+                from aiogram import Bot
+                bot = Bot(token=BOT_TOKEN)
+                try:
+                    await bot.send_message(chat_id=referrer_id, text=f"🎉 You received a referral bonus of {payout_currency}{bonus_amount:,.2f} for referring @{username}")
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"Referral reward failed: {e}")
 
     # Send completion message to user
     from datetime import datetime
     timestamp = datetime.now().strftime("%d/%m/%Y %H:%M")
     try:
-        await bot.send_message(chat_id=user_id, text=COMPLETED_MESSAGE.format(sent_amount=final_amount, from_currency='INR', received_amount=final_amount, to_currency='NPR', service_fee='0', request_id=request_id, timestamp=timestamp), parse_mode="HTML")
+        await bot.send_message(chat_id=user_id, text=COMPLETED_MESSAGE.format(sent_amount=final_amount, from_currency=from_currency, received_amount=final_amount, to_currency=to_currency, service_fee='0', request_id=request_id, timestamp=timestamp), parse_mode="HTML")
     except Exception as e:
         print(f"Error sending completion message: {e}")
 
-    await callback.answer("✅ Request approved and payout processed.")
+    await callback.answer("✅ Request approved and processed.")
     await callback.message.edit_reply_markup(reply_markup=None)
 
 
