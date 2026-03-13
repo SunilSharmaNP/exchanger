@@ -892,28 +892,45 @@ async def admin_mark_paid(callback: CallbackQuery):
         return
 
     # finalize payout: mark completed, update user's wallet, record transaction
+    # ensure numeric final_amount
+    try:
+        final_amount = float(final_amount)
+    except Exception:
+        final_amount = float(str(final_amount).replace(',', '')) if final_amount else 0.0
+
     if exchange_type == 'INR_TO_NPR':
-        # user should receive NPR
-        cursor.execute("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?", (final_amount, user_id))
         payout_currency = 'NPR'
         from_currency = 'INR'
         to_currency = 'NPR'
+        cursor.execute("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?", (final_amount, user_id))
     elif exchange_type == 'NPR_TO_INR':
-        cursor.execute("UPDATE users SET wallet_inr = COALESCE(wallet_inr,0) + ? WHERE user_id = ?", (final_amount, user_id))
         payout_currency = 'INR'
         from_currency = 'NPR'
         to_currency = 'INR'
+        cursor.execute("UPDATE users SET wallet_inr = COALESCE(wallet_inr,0) + ? WHERE user_id = ?", (final_amount, user_id))
     else:
-        # fallback — credit NPR
-        cursor.execute("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?", (final_amount, user_id))
         payout_currency = 'NPR'
         from_currency = 'INR'
         to_currency = 'NPR'
+        cursor.execute("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?", (final_amount, user_id))
 
+    # mark request completed and record payout transaction + admin log
     cursor.execute("UPDATE exchange_requests SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE request_id = ?", (request_id,))
     cursor.execute("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (user_id, request_id, 'payout', final_amount, payout_currency, 'completed'))
     cursor.execute("INSERT INTO admin_logs (admin_id, action, request_id, details) VALUES (?, ?, ?, ?)", (admin_id, 'paid', request_id, 'Admin confirmed payout'))
     conn.commit()
+
+    # fetch updated balances to confirm
+    try:
+        cur_check = get_db_connection().cursor()
+        cur_check.execute("SELECT wallet_inr, wallet_npr FROM users WHERE user_id = ?", (user_id,))
+        bal = cur_check.fetchone()
+        wallet_inr = bal[0] or 0
+        wallet_npr = bal[1] or 0
+    except Exception:
+        wallet_inr = None
+        wallet_npr = None
+
     conn.close()
 
     # finalize any held debit transaction for this request
