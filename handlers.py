@@ -1,3 +1,4 @@
+
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
@@ -40,6 +41,12 @@ class AdminStates(StatesGroup):
 class WalletStates(StatesGroup):
     loading_wallet = State()
     entering_load_amount = State()
+
+
+class WithdrawalStates(StatesGroup):
+    selecting_currency = State()
+    entering_withdraw_amount = State()
+    entering_withdraw_account = State()
 
 # ============================================================================
 # START COMMAND AND MENU
@@ -569,6 +576,151 @@ async def load_wallet(callback: CallbackQuery):
     )
 
 
+@router.callback_query(F.data == "withdraw")
+async def withdraw_callback(callback: CallbackQuery, state: FSMContext):
+    """Open withdrawal currency choices from start keyboard"""
+    user_id = callback.from_user.id
+    if is_user_banned(user_id):
+        await callback.answer(ERROR_MESSAGES["banned"], show_alert=True)
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💵 Withdraw INR", callback_data="withdraw_inr")],
+        [InlineKeyboardButton(text="₨ Withdraw NPR", callback_data="withdraw_npr")],
+        [InlineKeyboardButton(text="↩️ Back", callback_data="back_to_start")]
+    ])
+
+    try:
+        await callback.message.edit_text(text="💸 <b>Withdraw Funds</b>\n\nSelect currency to withdraw:", parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text="💸 <b>Withdraw Funds</b>\n\nSelect currency to withdraw:", parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+
+@router.message(lambda msg: msg.text == "/withdraw")
+async def withdraw_command(message: Message, state: FSMContext):
+    """Start withdrawal flow via command /withdraw"""
+    user_id = message.from_user.id
+    if is_user_banned(user_id):
+        await message.answer(ERROR_MESSAGES["banned"])
+        return
+
+    # Show inline choices for currency
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💵 Withdraw INR", callback_data="withdraw_inr")],
+        [InlineKeyboardButton(text="₨ Withdraw NPR", callback_data="withdraw_npr")],
+        [InlineKeyboardButton(text="↩️ Back", callback_data="back_to_start")]
+    ])
+    await state.clear()
+    await message.answer(text="💸 <b>Withdraw Funds</b>\n\nSelect currency to withdraw:", parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data == "withdraw_inr")
+async def withdraw_inr(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    if is_user_banned(user_id):
+        await callback.answer(ERROR_MESSAGES["banned"], show_alert=True)
+        return
+
+    await state.set_state(WithdrawalStates.entering_withdraw_amount)
+    await state.update_data(withdraw_currency="INR")
+    await callback.message.edit_text(text="💵 <b>Withdraw INR</b>\n\nEnter amount to withdraw:", parse_mode="HTML", reply_markup=get_back_button())
+
+
+@router.callback_query(F.data == "withdraw_npr")
+async def withdraw_npr(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    if is_user_banned(user_id):
+        await callback.answer(ERROR_MESSAGES["banned"], show_alert=True)
+        return
+
+    await state.set_state(WithdrawalStates.entering_withdraw_amount)
+    await state.update_data(withdraw_currency="NPR")
+    await callback.message.edit_text(text="₨ <b>Withdraw NPR</b>\n\nEnter amount to withdraw:", parse_mode="HTML", reply_markup=get_back_button())
+
+
+@router.message(WithdrawalStates.entering_withdraw_amount)
+async def process_withdraw_amount(message: Message, state: FSMContext):
+    is_valid, result = validate_amount(message.text)
+    if not is_valid:
+        await message.answer(text=f"❌ {result}", parse_mode="HTML")
+        return
+
+    amount = result
+    data = await state.get_data()
+    currency = data.get("withdraw_currency", "INR")
+    user_id = message.from_user.id
+
+    # Check balance
+    user_info = get_user_info(user_id)
+    wallet_inr = float(user_info["wallet_inr"] or 0) if user_info else 0
+    wallet_npr = float(user_info["wallet_npr"] or 0) if user_info else 0
+
+    if currency == "INR" and wallet_inr < amount:
+        await message.answer(text=(f"⚠️ Insufficient INR wallet balance.\n\nRequested: {format_currency(amount, 'INR')}\nYour INR Wallet: {format_currency(wallet_inr, 'INR')}\n\nPlease load your INR wallet before proceeding."), parse_mode="HTML", reply_markup=get_load_wallet_keyboard())
+        await state.clear()
+        return
+    if currency == "NPR" and wallet_npr < amount:
+        await message.answer(text=(f"⚠️ Insufficient NPR wallet balance.\n\nRequested: {format_currency(amount, 'NPR')}\nYour NPR Wallet: {format_currency(wallet_npr, 'NPR')}\n\nPlease load your NPR wallet before proceeding."), parse_mode="HTML", reply_markup=get_load_wallet_keyboard())
+        await state.clear()
+        return
+
+    await state.update_data(withdraw_amount=amount)
+    await state.set_state(WithdrawalStates.entering_withdraw_account)
+    await message.answer(text="📋 <b>Receiving Account / UPI</b>\n\nPlease send the account number or UPI ID where you'd like to receive the funds.", parse_mode="HTML", reply_markup=get_back_button())
+
+
+@router.message(WithdrawalStates.entering_withdraw_account)
+async def receive_withdraw_account(message: Message, state: FSMContext):
+    account = message.text.strip()
+    if not account:
+        await message.answer("❌ Please provide a valid account number or UPI ID.")
+        return
+
+    data = await state.get_data()
+    user_id = message.from_user.id
+    username = message.from_user.username or "Unknown"
+    currency = data.get("withdraw_currency")
+    amount = float(data.get("withdraw_amount", 0))
+
+    # persist request into exchange_requests table using WITHDRAW type and store account as transaction_id
+    from database import execute_db
+    request_id = execute_db("INSERT INTO exchange_requests (user_id, username, exchange_type, amount, exchange_rate, calculated_amount, service_fee, final_amount, transaction_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
+        user_id, username, f"WITHDRAW_{currency}", amount, 1.0, amount, 0.0, amount, account, "pending"
+    ), commit=True)
+
+    # Reserve (deduct) from user's wallet and record held debit
+    try:
+        conn2 = get_db_connection()
+        cur2 = conn2.cursor()
+        if currency == 'INR':
+            cur2.execute("UPDATE users SET wallet_inr = COALESCE(wallet_inr,0) - ? WHERE user_id = ? AND COALESCE(wallet_inr,0) >= ?", (amount, user_id, amount))
+            cur_currency = 'INR'
+        else:
+            cur2.execute("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) - ? WHERE user_id = ? AND COALESCE(wallet_npr,0) >= ?", (amount, user_id, amount))
+            cur_currency = 'NPR'
+
+        if cur2.rowcount == 0:
+            conn2.close()
+            await message.answer("⚠️ Could not reserve funds from your wallet (possible race). Please try again.")
+            await state.clear()
+            return
+
+        cur2.execute("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (user_id, request_id, 'debit', amount, cur_currency, 'held'))
+        conn2.commit()
+        conn2.close()
+    except Exception as e:
+        print(f"Error reserving funds for withdrawal: {e}")
+
+    # confirm to user
+    await message.answer(text=(f"✅ Withdrawal request #{request_id} created.\n\n• Currency: {currency}\n• Amount: {format_currency(amount, currency)}\n• Receiving: {account}\n\nYour request is now with our admin team for verification. You will be notified when the payout is completed."), parse_mode="HTML", reply_markup=get_start_keyboard())
+
+    # notify admin, use account as transaction_id parameter
+    await notify_admin(user_id, username, data={"exchange_type": f"WITHDRAW_{currency}", "amount": amount, "from_currency": currency, "to_currency": currency, "final_amount": amount, "exchange_rate": 1.0, "calculated_amount": amount}, transaction_id=account, request_id=request_id, message=message)
+
+    await state.clear()
+
+
 @router.callback_query(F.data == "load_inr")
 async def load_inr(callback: CallbackQuery, state: FSMContext):
     """Start loading INR into wallet"""
@@ -898,16 +1050,24 @@ async def admin_mark_paid(callback: CallbackQuery):
     except Exception:
         final_amount = float(str(final_amount).replace(',', '')) if final_amount else 0.0
 
+    # Determine payout behavior: for withdrawals we do NOT credit user's wallet
     if exchange_type == 'INR_TO_NPR':
         payout_currency = 'NPR'
         from_currency = 'INR'
         to_currency = 'NPR'
+        # Credit user's receiving wallet (internal payout)
         cursor.execute("UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?", (final_amount, user_id))
     elif exchange_type == 'NPR_TO_INR':
         payout_currency = 'INR'
         from_currency = 'NPR'
         to_currency = 'INR'
         cursor.execute("UPDATE users SET wallet_inr = COALESCE(wallet_inr,0) + ? WHERE user_id = ?", (final_amount, user_id))
+    elif exchange_type and exchange_type.startswith('WITHDRAW_'):
+        # Withdrawals: admin sends external payment to user; do NOT credit wallet here
+        payout_currency = 'INR' if exchange_type.endswith('INR') else 'NPR'
+        from_currency = payout_currency
+        to_currency = payout_currency
+        # No wallet credit; user's funds were reserved at request creation
     else:
         payout_currency = 'NPR'
         from_currency = 'INR'
@@ -916,6 +1076,7 @@ async def admin_mark_paid(callback: CallbackQuery):
 
     # mark request completed and record payout transaction + admin log
     cursor.execute("UPDATE exchange_requests SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE request_id = ?", (request_id,))
+    # For withdrawals we still record a payout transaction (admin external payout) but DO NOT credit wallet
     cursor.execute("INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status) VALUES (?, ?, ?, ?, ?, ?)", (user_id, request_id, 'payout', final_amount, payout_currency, 'completed'))
     cursor.execute("INSERT INTO admin_logs (admin_id, action, request_id, details) VALUES (?, ?, ?, ?)", (admin_id, 'paid', request_id, 'Admin confirmed payout'))
     conn.commit()
