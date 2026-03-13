@@ -579,18 +579,26 @@ async def process_wallet_load_amount(message: Message, state: FSMContext):
     load_currency = data.get("load_currency", "INR")
     user_id = message.from_user.id
     username = message.from_user.username or "Unknown"
-
-    # Save as a pending exchange_requests row (type LOAD_INR / LOAD_NPR)
+    # Prepare a wallet-load exchange in FSM state (don't save to DB yet).
+    # We will ask for screenshot and transaction ID, then persist and notify admin
+    # once both are received (same flow as INR↔NPR exchange).
     exchange_type = "LOAD_INR" if load_currency == "INR" else "LOAD_NPR"
-    from database import execute_db
 
-    request_id = execute_db(
-        "INSERT INTO exchange_requests (user_id, username, exchange_type, amount, exchange_rate, calculated_amount, service_fee, final_amount, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (user_id, username, exchange_type, amount, 1.0, amount, 0.0, amount, 'pending'),
-        commit=True
+    # Store all necessary details in state; set waiting for payment so
+    # when user clicks 'I have paid' the standard payment flow continues.
+    await state.update_data(
+        exchange_type=exchange_type,
+        amount=amount,
+        exchange_rate=1.0,
+        calculated_amount=amount,
+        service_fee=0.0,
+        final_amount=amount,
+        from_currency=load_currency,
+        to_currency=load_currency
     )
 
-    # Send payment instructions
+    # Send payment instructions and set to waiting_payment so `payment_done`
+    # handler will prompt for screenshot (reusing the exchange flow behavior).
     upi_id, esewa_id = get_payment_details()
     payment_msg = PAYMENT_INSTRUCTIONS.format(upi_id=upi_id, esewa_id=esewa_id, user_id=user_id)
 
@@ -599,20 +607,7 @@ async def process_wallet_load_amount(message: Message, state: FSMContext):
     except Exception:
         await message.answer(text=payment_msg, parse_mode="HTML", reply_markup=get_payment_keyboard())
 
-    # Notify admin about new wallet load request
-    notify_data = {
-        "exchange_type": exchange_type,
-        "amount": amount,
-        "exchange_rate": 1.0,
-        "calculated_amount": amount,
-        "service_fee": 0.0,
-        "final_amount": amount,
-        "from_currency": load_currency,
-        "to_currency": load_currency
-    }
-
-    await notify_admin(user_id, username, notify_data, transaction_id="-", request_id=request_id, message=message)
-    await state.clear()
+    await state.set_state(ExchangeStates.waiting_payment)
 
 # ============================================================================
 # BACK TO START
