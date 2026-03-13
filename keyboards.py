@@ -32,6 +32,10 @@ def get_exchange_confirmation_keyboard():
             InlineKeyboardButton(text="✅ Confirm Exchange", callback_data="confirm_exchange"),
             InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_exchange")
         ]
+        ,
+        [
+            InlineKeyboardButton(text="🔙 Back", callback_data="back_to_start")
+        ]
     ])
     return keyboard
 
@@ -41,6 +45,10 @@ def get_payment_keyboard():
         [
             InlineKeyboardButton(text="📤 I Have Paid", callback_data="payment_done"),
             InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_payment")
+        ]
+        ,
+        [
+            InlineKeyboardButton(text="🔙 Back", callback_data="back_to_start")
         ]
     ])
     return keyboard
@@ -54,6 +62,9 @@ def get_admin_approval_keyboard(request_id):
         ],
         [
             InlineKeyboardButton(text="💬 Message User", callback_data=f"admin_message_{request_id}")
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Back", callback_data="back_to_admin")
         ]
     ])
     return keyboard
