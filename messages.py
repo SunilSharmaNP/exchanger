@@ -1,311 +1,301 @@
-# Professional message templates with emojis
-
 WELCOME_MESSAGE = """
-🌍 <b>Welcome to Currency Exchange Bot</b>
+🌍 <b>INR ⇄ NPR Exchange</b>
 
-Your trusted platform for seamless INR ⇄ NPR currency exchange.
+Your trusted platform for fast, secure currency exchange between India and Nepal.
 
-<b>✨ Key Features:</b>
-• 🔄 Instant exchange calculation
-• 💯 Transparent pricing with clear fees
-• 🔐 Secure payment verification
-• ⚡ Fast payout system
-• 📊 Complete transaction history
-• 💬 24/7 Support
+<b>💹 Live Rates:</b>
+• 1 INR = <b>{inr_to_npr} NPR</b>
+• 1 NPR = <b>{npr_to_inr} INR</b>
 
-<b>📌 How to get started:</b>
-1. Select exchange direction
-2. Enter amount
-3. Verify your payment
-4. Get instant payout
+<b>✨ What you can do:</b>
+• 💱 Exchange INR ↔ NPR instantly
+• 💰 Load &amp; manage your wallet
+• 💸 Withdraw anytime
+• 📊 Full transaction history
+• 💬 Live support chat
 
-<i>All transactions are secure and verified by our admin team.</i>
+<i>All transactions are secured and verified by our admin team.</i>
 """
 
 EXCHANGE_STARTED = """
-💱 <b>Select Exchange Type</b>
+💱 <b>Select Exchange Direction</b>
 
-Choose which currency you want to exchange:
-
-• <b>INR → NPR:</b> Convert Indian Rupees to Nepali Rupees
-• <b>NPR → INR:</b> Convert Nepali Rupees to Indian Rupees
-
-Click below to continue!
+Choose which currency you want to convert:
 """
 
 ENTER_AMOUNT = """
-💰 <b>Enter Exchange Amount</b>
+💰 <b>Enter Amount</b>
 
 Please enter the amount you want to exchange:
 
-<b>⚠️ Limits:</b>
-• Minimum: 100
-• Maximum: 100,000
+<b>Limits:</b>
+• Minimum: ₹100 / ₨100
+• Maximum: ₹1,00,000 / ₨1,00,000
 
-<i>Send me the amount as a number (e.g., 1000)</i>
+<i>Type the number and press Send (e.g. 5000)</i>
 """
 
 EXCHANGE_SUMMARY = """
 📊 <b>Exchange Summary</b>
 
 <code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>
-
-You are exchanging: <b>{amount} {from_currency}</b>
-
-Exchange rate: <b>1 {from_currency} = {rate} {to_currency}</b>
-
-Amount to receive: <b>{calculated_amount} {to_currency}</b>
-
+You send:       <b>{amount} {from_currency}</b>
+Rate:           <b>1 {from_currency} = {rate} {to_currency}</b>
+Gross amount:   <b>{calculated_amount} {to_currency}</b>
 Service fee ({fee_percent}%): <b>- {service_fee} {to_currency}</b>
-
-<b>Final amount:</b> <b>{final_amount} {to_currency}</b>
-
+<b>You receive:    {final_amount} {to_currency}</b>
 <code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>
 
-<i>Please review the details and confirm to proceed with payment.</i>
+<i>Please review carefully before confirming.</i>
 """
 
 PAYMENT_INSTRUCTIONS = """
 💳 <b>Payment Instructions</b>
 
-Send payment using one of the methods below:
+Send <b>exactly</b> the amount shown in your exchange summary.
 
-<b>Method 1: UPI</b>
-UPI ID: <code>{upi_id}</code>
+<b>🇮🇳 UPI (India):</b>
+<code>{upi_id}</code>
 
-<b>Method 2: eSewa (Nepal)</b>
-eSewa ID: <code>{esewa_id}</code>
+<b>🇳🇵 eSewa (Nepal):</b>
+<code>{esewa_id}</code>
 
-<b>⚠️ Important Notes:</b>
-• Include your User ID in payment reference: <code>{user_id}</code>
-• Screenshot your payment confirmation
-• Click "I Have Paid" button after sending payment
-• Support team will verify and process within 5 minutes
+<b>⚠️ Important:</b>
+• Use <code>{user_id}</code> as payment reference/note
+• Take a screenshot immediately after payment
+• Click <b>"I Have Paid"</b> only after payment is sent
 
-<i>Once payment is verified, you'll receive your amount instantly!</i>
+<i>Payments are verified within 5–10 minutes.</i>
 """
 
 PAYMENT_VERIFICATION = """
 ✅ <b>Payment Verification</b>
 
-Please provide the following details for verification:
+Please complete both steps below:
 
-<b>Step 1:</b> Upload payment screenshot
-<b>Step 2:</b> Send transaction ID
+<b>Step 1 📸</b> — Upload your payment screenshot
+<b>Step 2 🔢</b> — Send the transaction ID
 
-<i>Make sure the screenshot clearly shows the transaction details.</i>
+<i>Make sure the screenshot clearly shows the amount and date.</i>
 """
 
 ADMIN_REQUEST = """
-🔔 <b>New Exchange Request</b>
+🔔 <b>New Request — #{request_id}</b>
 
 <code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>
-
-<b>User Details:</b>
-• User ID: <code>{user_id}</code>
-• Username: @{username}
-
-<b>Exchange Details:</b>
-• Type: {exchange_type}
-• Amount: {amount}
-• Rate: {rate}
-• Final Amount: {final_amount} {to_currency}
-
-<b>Payment Proof:</b>
-• Transaction ID: <code>{transaction_id}</code>
-• Screenshot: ✅ Attached
-
+<b>User:</b>   <a href="tg://user?id={user_id}">@{username}</a> (<code>{user_id}</code>)
+<b>Type:</b>   {exchange_type}
+<b>Sends:</b>  {amount}
+<b>Rate:</b>   {rate}
+<b>Receives:</b> {final_amount} {to_currency}
+<b>Txn ID:</b> <code>{transaction_id}</code>
 <code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>
 
-<i>Click below to approve or reject this request.</i>
+<i>Screenshot is attached above. Approve or reject below.</i>
 """
 
 APPROVED_MESSAGE = """
-✅ <b>Exchange Approved!</b>
+✅ <b>Request #{request_id} — Approved!</b>
 
-Great news! Your exchange request has been approved by our admin.
+Great news! Your exchange request has been approved.
 
-<b>Details:</b>
-• Amount: {final_amount} {to_currency}
-• Status: ⏳ Processing Payout
-• Estimated Time: 5-10 minutes
+<b>You will receive:</b> <b>{final_amount} {to_currency}</b>
+<b>Status:</b> ⏳ Processing payout…
 
-<i>You'll receive a confirmation message once the payout is completed.</i>
+You'll get a confirmation once payment is sent to you.
+<i>Estimated time: 5–15 minutes</i>
 """
 
 COMPLETED_MESSAGE = """
-✨ <b>Transaction Completed!</b>
+🎉 <b>Transaction Completed — #{request_id}</b>
 
 Your exchange has been successfully processed.
 
-<b>Final Details:</b>
-• Sent: {sent_amount} {from_currency}
-• Received: {received_amount} {to_currency}
-• Fee Charged: {service_fee} {to_currency}
-• Transaction ID: <code>{request_id}</code>
-• Completed at: {timestamp}
+<code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>
+<b>Sent:</b>      {sent_amount} {from_currency}
+<b>Received:</b>  {received_amount} {to_currency}
+<b>Fee:</b>       {service_fee} {to_currency}
+<b>Completed:</b> {timestamp}
+<code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>
 
-<b>Balance Update:</b>
-• {to_currency} Wallet: +{received_amount}
-
-<i>Thank you for using our service! Your money should arrive shortly.</i>
+<i>Thank you for using our service! 🙏</i>
 """
 
 REJECTED_MESSAGE = """
-❌ <b>Exchange Rejected</b>
+❌ <b>Request #{request_id} — Rejected</b>
 
-Unfortunately, your exchange request could not be processed.
+Unfortunately your request could not be processed.
 
 <b>Reason:</b> {reason}
 
-<b>Please Note:</b>
-• Your payment will be refunded
-• You can retry the exchange after reviewing the requirements
-• Contact support if you have questions
+<b>What next?</b>
+• Any reserved funds have been refunded to your wallet
+• You can retry after reviewing the issue
+• Contact support if you need help
 
-<i>We're here to help! Reach out to our support team for assistance.</i>
+<i>Tap "📞 Support" from the main menu to reach us.</i>
 """
 
 CURRENT_RATE = """
-💹 <b>Current Exchange Rates</b>
+💹 <b>Live Exchange Rates</b>
 
-<code>━━━━━━━━━━━━━━━━━━━━━━━</code>
+<code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>
+🇮🇳 <b>1 INR  =  {inr_to_npr} NPR</b>
+🇳🇵 <b>1 NPR  =  {npr_to_inr} INR</b>
+<code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>
 
-💵 <b>INR to NPR</b>
-1 INR = <b>{inr_to_npr} NPR</b>
-
-₨ <b>NPR to INR</b>
-1 NPR = <b>{npr_to_inr} INR</b>
-
-<code>━━━━━━━━━━━━━━━━━━━━━━━</code>
-
-<i>Rates are updated every 24 hours. Service fee: 2.5%</i>
+📌 Service fee: {fee}%
+🕐 Rates updated by admin as needed.
 """
 
 TRANSACTION_HISTORY = """
-📜 <b>Your Transaction History</b>
+📜 <b>Transaction History</b>
 
 {transactions}
-
-<code>━━━━━━━━━━━━━━━━━━━━━━━</code>
-
-<b>Summary:</b>
-• Total Transactions: {total}
-• Total Amount Exchanged: {total_amount}
-
-<i>Tap on any transaction for detailed information.</i>
+<code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>
+<b>Completed:</b> {total} txn(s) · <b>Volume:</b> {total_amount}
 """
 
 HOW_IT_WORKS = """
 📚 <b>How It Works</b>
 
-<b>Step 1️⃣ - Select Exchange Type</b>
-Choose whether you want to exchange INR to NPR or NPR to INR.
+<b>1️⃣ Load Wallet</b>
+Add INR or NPR funds via UPI / eSewa. Admin verifies and credits your wallet.
 
-<b>Step 2️⃣ - Enter Amount</b>
-Tell us how much you want to exchange. Our bot will calculate instantly!
+<b>2️⃣ Exchange</b>
+Pick direction (INR→NPR or NPR→INR), enter amount, review the summary.
 
-<b>Step 3️⃣ - Review Summary</b>
-Check the exchange rate, fee, and final amount. Everything is transparent!
+<b>3️⃣ Confirm &amp; Pay</b>
+Send payment to the UPI / eSewa ID shown, take a screenshot.
 
-<b>Step 4️⃣ - Send Payment</b>
-We provide UPI and eSewa payment methods. Send payment using your preferred method.
+<b>4️⃣ Upload Proof</b>
+Send the screenshot + transaction ID in the bot.
 
-<b>Step 5️⃣ - Verify Payment</b>
-Upload your payment screenshot and transaction ID for verification.
+<b>5️⃣ Admin Verifies</b>
+Our team checks the proof — usually 5–15 minutes.
 
-<b>Step 6️⃣ - Admin Approval</b>
-Our team verifies your payment within 5 minutes.
+<b>6️⃣ Receive Funds</b>
+Once approved, your wallet / destination account is credited instantly.
 
-<b>Step 7️⃣ - Receive Money</b>
-Once approved, payout instructions are automatically sent!
-
-🔐 <i>Your security is our priority. All transactions are encrypted and verified.</i>
+<code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>
+🔐 <i>All transactions are encrypted and manually verified for your security.</i>
 """
 
-SUPPORT_MESSAGE = """
-📞 <b>Support & Help</b>
+SUPPORT_MENU = """
+📞 <b>Support Centre</b>
 
-<b>❓ Common Questions:</b>
-• <b>Why is there a service fee?</b> The 2.5% fee covers transaction costs and operational expenses.
-• <b>How long does verification take?</b> Usually 5-10 minutes during business hours.
-• <b>What payment methods do you accept?</b> UPI and eSewa (Nepal).
-• <b>Is my transaction secure?</b> Yes! All payments are verified by our admin team.
+<b>❓ Common Questions</b>
+• <b>How long does verification take?</b>
+  5–15 minutes during business hours.
+• <b>Why is there a service fee?</b>
+  The {fee}% fee covers processing and operational costs.
+• <b>What payment methods?</b>
+  UPI (India) and eSewa (Nepal).
+• <b>Is my money safe?</b>
+  Yes — funds are held and only released after admin verification.
 
-<b>📧 Contact Us:</b>
-• WhatsApp: wa.me/+977XXXXXXXXX
-• Email: support@exchangebot.com
-• Telegram: @support_bot
+<b>💬 Still need help?</b>
+Open a support ticket and we'll get back to you shortly.
+"""
 
-<i>We're available 24/7 to help you!</i>
+SUPPORT_TICKET_CREATED = """
+🎟️ <b>Support Ticket #{ticket_id} Opened</b>
+
+Your message has been sent to our support team.
+We typically respond within 30 minutes.
+
+You'll receive a notification here when we reply.
+<i>You can send follow-up messages using the button below.</i>
+"""
+
+SUPPORT_TICKET_REPLY = """
+📨 <b>Support Reply — Ticket #{ticket_id}</b>
+
+{reply_text}
+
+<i>Tap "Reply" below to respond.</i>
+"""
+
+SUPPORT_ADMIN_TICKET = """
+🎟️ <b>Support Ticket #{ticket_id}</b>
+
+<b>From:</b> <a href="tg://user?id={user_id}">@{username}</a> (<code>{user_id}</code>)
+<b>Subject:</b> {subject}
+
+<b>Message:</b>
+{message_text}
+"""
+
+SUPPORT_TICKET_CLOSED = """
+✅ <b>Ticket #{ticket_id} Closed</b>
+
+Your support ticket has been resolved and closed by our team.
+
+If you need further help, you can open a new ticket anytime.
+<i>Thank you for using our support! 🙏</i>
 """
 
 PROFILE_MESSAGE = """
 👤 <b>Your Profile</b>
 
-<code>━━━━━━━━━━━━━━━━━━━━━━━</code>
+<code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>
+<b>Name:</b>     {first_name}
+<b>Username:</b> @{username}
+<b>ID:</b>       <code>{user_id}</code>
+<b>Member since:</b> {joined_date}
 
-<b>Account Info:</b>
-• Name: {first_name}
-• Username: @{username}
-• User ID: <code>{user_id}</code>
-• Member Since: {joined_date}
+<b>💼 Wallet</b>
+• INR: <b>{wallet_inr}</b>
+• NPR: <b>{wallet_npr}</b>
 
-<b>Wallet Balance:</b>
-• 💵 INR: {wallet_inr}
-• ₨ NPR: {wallet_npr}
+<b>📊 Stats</b>
+• Exchanges completed: <b>{total_exchanges}</b>
+• Total volume: <b>{total_amount}</b>
 
-<b>Exchange Statistics:</b>
-• Total Exchanges: {total_exchanges}
-• Total Amount: {total_amount}
-
-<b>Referral:</b>
-• Your Code: <code>{referral_code}</code>
-• People Referred: {referred_count}
-
-<code>━━━━━━━━━━━━━━━━━━━━━━━</code>
+<b>🔗 Referral</b>
+• Your code: <code>{referral_code}</code>
+• Referral link: {referral_link}
+• Friends referred: <b>{referred_count}</b>
+<code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>
 """
 
 ADMIN_STATS = """
 📊 <b>Bot Statistics</b>
 
-<code>━━━━━━━━━━━━━━━━━━━━━━━</code>
+<code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>
+<b>👥 Users</b>
+• Total: {total_users}  |  New today: {new_users}
+• Active today: {active_today}
 
-<b>User Stats:</b>
-• Total Users: {total_users}
-• Active Users (Today): {active_today}
-• New Users (Today): {new_users}
+<b>💱 Transactions</b>
+• Total: {total_transactions}
+• Completed: {completed}  |  Pending: {pending}  |  Rejected: {rejected}
 
-<b>Transaction Stats:</b>
-• Total Transactions: {total_transactions}
-• Completed: {completed}
-• Pending: {pending}
-• Rejected: {rejected}
+<b>💰 Volume</b>
+• INR volume: {total_inr}
+• NPR volume: {total_npr}
+• Fees collected: {total_fees}
 
-<b>Volume Stats:</b>
-• Total Volume (INR): {total_inr}
-• Total Volume (NPR): {total_npr}
-• Total Fees Collected: {total_fees}
+<b>💹 Rates</b>
+• INR→NPR: {inr_to_npr}  |  NPR→INR: {npr_to_inr}
 
-<b>Exchange Rates:</b>
-• INR → NPR: {inr_to_npr}
-• NPR → INR: {npr_to_inr}
-
-<code>━━━━━━━━━━━━━━━━━━━━━━━</code>
-<i>Last updated: {updated_at}</i>
+<b>💬 Support</b>
+• Open tickets: {open_tickets}
+<code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>
+<i>Updated: {updated_at}</i>
 """
 
 ERROR_MESSAGES = {
-    "invalid_amount": "❌ Invalid amount! Please enter a number between 100 and 100,000.",
-    "amount_too_low": "❌ Amount is too low! Minimum exchange is 100.",
-    "amount_too_high": "❌ Amount is too high! Maximum exchange is 100,000.",
-    "anti_spam": "⏱️ Please wait before making another exchange. You can make another in {wait_time} minutes.",
-    "banned": "🚫 Your account has been suspended. Contact support for details.",
-    "database_error": "⚠️ Database error. Please try again later.",
-    "invalid_input": "❌ Invalid input! Please try again.",
+    "invalid_amount": "❌ Please enter a valid number between 100 and 1,00,000.",
+    "amount_too_low": "❌ Minimum exchange amount is 100.",
+    "amount_too_high": "❌ Maximum exchange amount is 1,00,000.",
+    "anti_spam": "⏱️ Too many requests. Please wait {wait_time} minute(s) before trying again.",
+    "banned": "🚫 Your account has been suspended. Tap Support to contact us.",
+    "database_error": "⚠️ A database error occurred. Please try again later.",
+    "invalid_input": "❌ Invalid input — please try again.",
 }
 
 SUCCESS_MESSAGES = {
-    "payment_received": "✅ Payment verification received! Admin will review shortly.",
-    "exchange_completed": "✨ Exchange completed successfully!",
+    "payment_received": "✅ Payment proof received! Our team will verify shortly.",
+    "exchange_completed": "🎉 Exchange completed successfully!",
 }
