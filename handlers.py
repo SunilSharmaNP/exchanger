@@ -13,6 +13,7 @@ from config import (
     BOT_TOKEN, ADMIN_IDS, SERVICE_FEE_PERCENTAGE, BANNER_IMAGE_URL,
     ENABLE_REFERRAL, REFERRAL_BONUS_PERCENT
 )
+from log_channel import log_event
 from keyboards import (
     get_start_keyboard, get_exchange_confirmation_keyboard,
     get_payment_keyboard, get_admin_approval_keyboard,
@@ -243,7 +244,8 @@ async def start_command(message: Message, state: FSMContext):
             referrer_id = row[0]
 
     existing = execute_db("SELECT user_id FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-    if not existing:
+    is_new = not existing
+    if is_new:
         referral_code = generate_referral_code(user_id)
         execute_db(
             "INSERT INTO users (user_id, username, first_name, last_name, referral_code, referred_by)"
@@ -262,6 +264,13 @@ async def start_command(message: Message, state: FSMContext):
             "UPDATE users SET username = ?, first_name = ?, last_name = ? WHERE user_id = ?",
             (username, first_name, last_name, user_id), commit=True,
         )
+
+    await log_event(
+        message.bot, "user_start",
+        user_id=user_id, username=username,
+        first_name=first_name, last_name=message.from_user.last_name or "",
+        is_new=is_new,
+    )
 
     await state.clear()
     welcome = _build_welcome()
@@ -565,22 +574,114 @@ async def process_amount(message: Message, state: FSMContext):
 
 
 @router.callback_query(F.data == "confirm_exchange")
-async def confirm_exchange(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+async def confirm_exchange(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    await callback.answer("⚙️ Processing…")
+    data = await state.get_data()
+    exchange_type = data.get("exchange_type", "")
     user_id = callback.from_user.id
-    upi_id, esewa_id = get_payment_details()
-    payment_msg = PAYMENT_INSTRUCTIONS.format(upi_id=upi_id, esewa_id=esewa_id, user_id=user_id)
-    await state.set_state(ExchangeStates.waiting_payment)
-    await state.update_data(upi_id=upi_id, esewa_id=esewa_id)
-    try:
-        await callback.message.answer_photo(
-            photo=BANNER_IMAGE_URL,
-            caption=payment_msg,
-            parse_mode="HTML",
-            reply_markup=get_payment_keyboard(),
+    username = callback.from_user.username or "Unknown"
+    amount = float(data.get("amount", 0))
+    exchange_rate = float(data.get("exchange_rate", 1))
+    calculated_amount = float(data.get("calculated_amount", 0))
+    service_fee = float(data.get("service_fee", 0))
+    final_amount = float(data.get("final_amount", 0))
+    from_c = data.get("from_currency", "INR")
+    to_c = data.get("to_currency", "NPR")
+
+    # ── Atomic wallet swap ─────────────────────────────────────────────────────
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    if exchange_type == "INR_TO_NPR":
+        cur.execute(
+            "UPDATE users SET wallet_inr = COALESCE(wallet_inr,0) - ?"
+            " WHERE user_id = ? AND COALESCE(wallet_inr,0) >= ?",
+            (amount, user_id, amount),
         )
-    except Exception:
-        await callback.message.answer(payment_msg, parse_mode="HTML", reply_markup=get_payment_keyboard())
+    else:
+        cur.execute(
+            "UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) - ?"
+            " WHERE user_id = ? AND COALESCE(wallet_npr,0) >= ?",
+            (amount, user_id, amount),
+        )
+
+    if cur.rowcount == 0:
+        conn.close()
+        await state.clear()
+        await callback.message.answer(
+            "⚠️ <b>Insufficient Balance</b>\n\n"
+            "Your wallet balance changed. Please check your wallet and try again.",
+            parse_mode="HTML",
+            reply_markup=get_start_keyboard(),
+        )
+        return
+
+    # Credit destination wallet
+    if exchange_type == "INR_TO_NPR":
+        cur.execute(
+            "UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) + ? WHERE user_id = ?",
+            (final_amount, user_id),
+        )
+    else:
+        cur.execute(
+            "UPDATE users SET wallet_inr = COALESCE(wallet_inr,0) + ? WHERE user_id = ?",
+            (final_amount, user_id),
+        )
+
+    # Record the completed exchange
+    now = datetime.now()
+    cur.execute(
+        "INSERT INTO exchange_requests"
+        " (user_id, username, exchange_type, amount, exchange_rate, calculated_amount,"
+        "  service_fee, final_amount, transaction_id, status, approved_at, completed_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'instant', 'completed', ?, ?)",
+        (user_id, username, exchange_type, amount, exchange_rate,
+         calculated_amount, service_fee, final_amount, now, now),
+    )
+    request_id = cur.lastrowid
+
+    cur.execute(
+        "INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status)"
+        " VALUES (?, ?, 'debit', ?, ?, 'completed')",
+        (user_id, request_id, amount, from_c),
+    )
+    cur.execute(
+        "INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status)"
+        " VALUES (?, ?, 'credit', ?, ?, 'completed')",
+        (user_id, request_id, final_amount, to_c),
+    )
+    cur.execute(
+        "UPDATE users SET total_exchanges = COALESCE(total_exchanges,0) + 1,"
+        " total_amount = COALESCE(total_amount,0) + ? WHERE user_id = ?",
+        (amount, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+    timestamp = now.strftime("%d/%m/%Y %H:%M")
+    await callback.message.answer(
+        COMPLETED_MESSAGE.format(
+            request_id=request_id,
+            sent_amount=format_currency(amount, from_c),
+            from_currency=from_c,
+            received_amount=format_currency(final_amount, to_c),
+            to_currency=to_c,
+            service_fee=format_currency(service_fee, to_c),
+            timestamp=timestamp,
+        ),
+        parse_mode="HTML",
+        reply_markup=get_start_keyboard(),
+    )
+
+    await log_event(
+        bot, "exchange_instant",
+        request_id=request_id, user_id=user_id, username=username,
+        sent=format_currency(amount, from_c),
+        received=format_currency(final_amount, to_c),
+        fee=format_currency(service_fee, to_c),
+    )
+    _apply_referral_bonus(user_id, username, request_id, final_amount, to_c, bot)
+    await state.clear()
 
 
 @router.callback_query(F.data == "payment_done")
@@ -703,6 +804,12 @@ async def receive_transaction_id(message: Message, state: FSMContext, bot: Bot):
     )
 
     await notify_admin(user_id, username, data, txn_id, request_id, bot)
+    await log_event(
+        bot, "wallet_load_request",
+        request_id=request_id, user_id=user_id, username=username,
+        amount=format_currency(data.get("amount", 0), data.get("from_currency", "INR")),
+        txn_id=txn_id,
+    )
     await state.clear()
 
 
@@ -1306,22 +1413,47 @@ async def receive_withdraw_account(message: Message, state: FSMContext, bot: Bot
         f"✅ <b>Withdrawal #{request_id} Submitted</b>\n\n"
         f"• Currency: <b>{currency}</b>\n"
         f"• Amount: <b>{format_currency(amount, currency)}</b>\n"
-        f"• Destination: <code>{account}</code>\n\n"
-        "Admin will process your withdrawal shortly. You'll be notified.",
+        f"• Receiving account: <code>{account}</code>\n\n"
+        "Our team will process your withdrawal shortly.\nYou'll be notified once it's done.",
         parse_mode="HTML",
         reply_markup=get_start_keyboard(),
     )
 
-    notify_data = {
-        "exchange_type": f"WITHDRAW_{currency}",
-        "amount": amount,
-        "from_currency": currency,
-        "to_currency": currency,
-        "final_amount": amount,
-        "exchange_rate": 1.0,
-        "screenshot_file_id": None,
-    }
-    await notify_admin(user_id, username, notify_data, account, request_id, bot)
+    # ── Notify admins with a dedicated withdrawal card ─────────────────────────
+    withdrawal_flag = "🇮🇳 UPI (INR)" if currency == "INR" else "🇳🇵 eSewa/Bank (NPR)"
+    withdrawal_admin_text = (
+        f"💸 <b>Withdrawal Request — #{request_id}</b>\n\n"
+        f"<code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>\n"
+        f"<b>User:</b>   <a href='tg://user?id={user_id}'>@{username}</a> (<code>{user_id}</code>)\n"
+        f"<b>Type:</b>   {withdrawal_flag}\n"
+        f"<b>Amount:</b> <b>{format_currency(amount, currency)}</b>\n"
+        f"<b>Send to:</b>\n<code>{account}</code>\n"
+        f"<code>━━━━━━━━━━━━━━━━━━━━━━━━━</code>\n\n"
+        f"<i>Send {format_currency(amount, currency)} to the account above, then click Mark Done.</i>"
+    )
+    mark_done_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Mark Done",    callback_data=f"admin_paid_{request_id}"),
+        InlineKeyboardButton(text="❌ Reject",       callback_data=f"admin_reject_{request_id}"),
+    ], [
+        InlineKeyboardButton(text="💬 Message User", callback_data=f"admin_message_{request_id}"),
+    ]])
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=withdrawal_admin_text,
+                parse_mode="HTML",
+                reply_markup=mark_done_kb,
+            )
+        except Exception as e:
+            print(f"[withdrawal_notify] admin {admin_id}: {e}")
+
+    await log_event(
+        bot, "withdrawal_request",
+        request_id=request_id, user_id=user_id, username=username,
+        amount=format_currency(amount, currency),
+        account=account,
+    )
     await state.clear()
 
 
@@ -1674,6 +1806,11 @@ async def admin_approve(callback: CallbackQuery, bot: Bot):
             pass
 
         await callback.answer("✅ Wallet load approved & credited.")
+        await log_event(
+            bot, "wallet_credited",
+            request_id=request_id, user_id=user_id, username=username,
+            amount=format_currency(final_amount, to_c), currency=to_c,
+        )
 
     else:
         # For exchanges / withdrawals — give admin a "Mark Paid" button
@@ -1804,6 +1941,12 @@ async def admin_mark_paid(callback: CallbackQuery, bot: Bot):
     except Exception:
         pass
 
+    _, to_c = get_exchange_currencies(exchange_type)
+    await log_event(
+        bot, "withdrawal_paid",
+        request_id=request_id, user_id=user_id, username=username,
+        amount=format_currency(final_amount, to_c),
+    )
     await callback.answer("✅ Marked as paid.")
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
@@ -1908,6 +2051,11 @@ async def _do_reject(request_id: int, admin_id: int, reason: str, bot: Bot):
         )
     except Exception as e:
         print(f"[reject] Notify user error: {e}")
+
+    await log_event(
+        bot, "request_rejected",
+        request_id=request_id, user_id=user_id, reason=reason,
+    )
 
 
 # ── Admin: message user (per request) ─────────────────────────────────────────
@@ -2198,6 +2346,12 @@ async def admin_credit(message: Message, bot: Bot):
         )
     except Exception:
         pass
+
+    await log_event(
+        bot, "admin_credit",
+        target_user_id=target_user_id, admin_id=message.from_user.id,
+        action=action, amount=format_currency(amount, currency),
+    )
 
 
 @router.message(lambda msg: msg.text and msg.text.startswith("/balance"))
