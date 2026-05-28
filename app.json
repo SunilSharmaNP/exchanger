@@ -1,1 +1,56 @@
+{
+  "name": "INR-NPR Exchange Bot",
+  "description": "Telegram bot for semi-automatic INR ⇄ NPR currency exchange.",
+  "keywords": ["telegram", "bot", "currency", "exchange", "inr", "npr"],
+  "website": "",
+  "repository": "https://github.com/SunilSharmaNP/exchanger",
+  "logo": "",
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "eco"
+    }
+  },
+  "env": {
+    "BOT_TOKEN": {
+      "description": "Telegram Bot Token from @BotFather",
+      "required": true
+    },
+    "ADMIN_IDS": {
+      "description": "Comma-separated Telegram user IDs for admins (e.g. 123456789,987654321)",
+      "required": true
+    },
+    "UPI_ID": {
+      "description": "UPI ID for receiving payments (India)",
+      "value": "business@upi",
+      "required": false
+    },
+    "ESEWA_ID": {
+      "description": "eSewa ID for receiving payments (Nepal)",
+      "value": "esewa@merchant",
+      "required": false
+    },
+    "SERVICE_FEE_PERCENTAGE": {
+      "description": "Service fee percentage charged per exchange",
+      "value": "2.5",
+      "required": false
+    },
+    "REFERRAL_BONUS_PERCENT": {
+      "description": "Bonus percentage credited to referrer on each approved exchange",
+      "value": "1.0",
+      "required": false
+    },
+    "IN_DOCKER": {
+      "description": "Set to 1 when running in a container so /restart exits cleanly",
+      "value": "1",
+      "required": false
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "stack": "heroku-22"
+}
 
