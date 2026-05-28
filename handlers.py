@@ -644,45 +644,47 @@ async def receive_transaction_id(message: Message, state: FSMContext, bot: Bot):
         commit=True,
     )
 
-    # Reserve source wallet funds
-    try:
-        conn2 = get_db_connection()
-        cur2 = conn2.cursor()
-        src_amount = float(data.get("amount", 0))
-        if data.get("exchange_type") == "INR_TO_NPR":
-            cur2.execute(
-                "UPDATE users SET wallet_inr = COALESCE(wallet_inr,0) - ? WHERE user_id = ? AND COALESCE(wallet_inr,0) >= ?",
-                (src_amount, user_id, src_amount),
-            )
-            src_currency = "INR"
-        else:
-            cur2.execute(
-                "UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) - ? WHERE user_id = ? AND COALESCE(wallet_npr,0) >= ?",
-                (src_amount, user_id, src_amount),
-            )
-            src_currency = "NPR"
+    # Reserve source wallet funds (only for actual exchanges, not for wallet loads)
+    exchange_type_val = data.get("exchange_type", "")
+    if exchange_type_val in ("INR_TO_NPR", "NPR_TO_INR"):
+        try:
+            conn2 = get_db_connection()
+            cur2 = conn2.cursor()
+            src_amount = float(data.get("amount", 0))
+            if exchange_type_val == "INR_TO_NPR":
+                cur2.execute(
+                    "UPDATE users SET wallet_inr = COALESCE(wallet_inr,0) - ? WHERE user_id = ? AND COALESCE(wallet_inr,0) >= ?",
+                    (src_amount, user_id, src_amount),
+                )
+                src_currency = "INR"
+            else:
+                cur2.execute(
+                    "UPDATE users SET wallet_npr = COALESCE(wallet_npr,0) - ? WHERE user_id = ? AND COALESCE(wallet_npr,0) >= ?",
+                    (src_amount, user_id, src_amount),
+                )
+                src_currency = "NPR"
 
-        if cur2.rowcount == 0:
+            if cur2.rowcount == 0:
+                conn2.close()
+                execute_db("DELETE FROM exchange_requests WHERE request_id = ?", (request_id,), commit=True)
+                await message.answer(
+                    "⚠️ <b>Insufficient Balance</b>\n\n"
+                    "Your wallet balance changed before this request was confirmed. Please try again.",
+                    parse_mode="HTML",
+                    reply_markup=get_start_keyboard(),
+                )
+                await state.clear()
+                return
+
+            cur2.execute(
+                "INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, request_id, "debit", src_amount, src_currency, "held"),
+            )
+            conn2.commit()
             conn2.close()
-            execute_db("DELETE FROM exchange_requests WHERE request_id = ?", (request_id,), commit=True)
-            await message.answer(
-                "⚠️ <b>Insufficient Balance</b>\n\n"
-                "Your wallet balance changed before this request was confirmed. Please try again.",
-                parse_mode="HTML",
-                reply_markup=get_start_keyboard(),
-            )
-            await state.clear()
-            return
-
-        cur2.execute(
-            "INSERT INTO transactions (user_id, exchange_request_id, transaction_type, amount, currency, status)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, request_id, "debit", src_amount, src_currency, "held"),
-        )
-        conn2.commit()
-        conn2.close()
-    except Exception as e:
-        print(f"[reserve_funds] Error: {e}")
+        except Exception as e:
+            print(f"[reserve_funds] Error: {e}")
 
     from_c = data.get("from_currency", "INR")
     to_c = data.get("to_currency", "NPR")
