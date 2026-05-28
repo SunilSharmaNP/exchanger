@@ -5,7 +5,26 @@ load_dotenv()
 
 # Bot Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "123456789").split(",")))
+def _parse_admin_ids(raw: str) -> list:
+    ids = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if not part.isdigit():
+            print(
+                f"\n❌ CONFIG ERROR: ADMIN_IDS contains an invalid value: '{part}'\n"
+                "   ADMIN_IDS must be a comma-separated list of Telegram USER IDs (numbers only).\n"
+                "   Example: ADMIN_IDS=123456789\n"
+                "   Your Telegram user ID is NOT the same as your bot token.\n"
+                "   Find your user ID by messaging @userinfobot on Telegram.\n"
+            )
+            raise SystemExit(1)
+        ids.append(int(part))
+    return ids or [123456789]
+
+
+ADMIN_IDS = _parse_admin_ids(os.getenv("ADMIN_IDS", "123456789"))
 
 # Optional API / Owner / Updater settings (can be set via .env)
 API_ID = os.getenv("API_ID", "")
@@ -38,6 +57,9 @@ DATABASE_PATH = "database/exchange_bot.db"
 # Image URLs (Optional - Can be replaced with local paths)
 BANNER_IMAGE_URL = "https://via.placeholder.com/1280x720?text=Currency+Exchange+Bot"
 PAYMENT_IMAGE_URL = "https://via.placeholder.com/800x400?text=Payment+Instructions"
+
+# Log Channel (optional — set to your Telegram channel ID, e.g. -1001234567890)
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0")) if os.getenv("LOG_CHANNEL_ID", "0").lstrip("-").isdigit() else 0
 
 # Features
 ENABLE_REFERRAL = True
