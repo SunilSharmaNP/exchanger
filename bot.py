@@ -4,6 +4,11 @@ from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, BotCommandScopeDefault
 
+try:
+    from aiogram.client.default import DefaultBotProperties
+except ImportError:
+    DefaultBotProperties = None
+
 from config import BOT_TOKEN
 from database import init_db
 from handlers import router
@@ -53,8 +58,11 @@ async def main():
     logger.info("Initializing database...")
     init_db()
 
-    # Initialize Bot & Dispatcher
-    bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+    # Initialize Bot & Dispatcher (compatible with aiogram >= 3.7.0 and older versions)
+    if DefaultBotProperties is not None:
+        bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    else:
+        bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
     dp = Dispatcher()
 
     # Register error handler
