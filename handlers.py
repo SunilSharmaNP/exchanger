@@ -2,7 +2,7 @@ import html
 import logging
 from datetime import datetime
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, URLInputFile
+from aiogram.types import Message, CallbackQuery, URLInputFile, ReplyKeyboardRemove
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -127,18 +127,33 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot):
         fee=f"{SERVICE_FEE_PERCENTAGE:.1f}"
     )
 
+    # Remove any cached reply keyboard from user screen
+    try:
+        cleanup = await message.answer("⚡", reply_markup=ReplyKeyboardRemove())
+        await cleanup.delete()
+    except Exception:
+        pass
+
     if BANNER_IMAGE_URL:
         try:
             await message.answer_photo(
                 photo=BANNER_IMAGE_URL,
                 caption=welcome_text,
-                reply_markup=get_start_reply_keyboard(),
+                reply_markup=get_start_reply_keyboard(is_admin=is_admin(user_id)),
                 parse_mode="HTML"
             )
         except Exception:
-            await message.answer(welcome_text, reply_markup=get_start_reply_keyboard(), parse_mode="HTML")
+            await message.answer(
+                welcome_text,
+                reply_markup=get_start_reply_keyboard(is_admin=is_admin(user_id)),
+                parse_mode="HTML"
+            )
     else:
-        await message.answer(welcome_text, reply_markup=get_start_reply_keyboard(), parse_mode="HTML")
+        await message.answer(
+            welcome_text,
+            reply_markup=get_start_reply_keyboard(is_admin=is_admin(user_id)),
+            parse_mode="HTML"
+        )
 
     if is_new:
         await log_event(
@@ -1412,10 +1427,402 @@ async def cb_back_to_admin(callback: CallbackQuery):
     )
 
 
-@router.callback_query(F.data == "back_to_start")
-async def cb_back_to_start(callback: CallbackQuery):
+@router.callback_query(F.data.in_(["back_to_start", "btn_home"]))
+async def cb_back_to_start(callback: CallbackQuery, state: FSMContext = None):
+    if state:
+        await state.clear()
     await callback.answer()
-    await callback.message.answer("Main Menu:", reply_markup=get_start_reply_keyboard())
+    user_id = callback.from_user.id
+    inr_to_npr = get_exchange_rate("INR_TO_NPR") or DEFAULT_INR_TO_NPR_RATE
+    npr_to_inr = get_exchange_rate("NPR_TO_INR") or DEFAULT_NPR_TO_INR_RATE
+    welcome_text = WELCOME_MESSAGE.format(
+        inr_to_npr=f"{inr_to_npr:.4f}",
+        npr_to_inr=f"{npr_to_inr:.4f}",
+        fee=f"{SERVICE_FEE_PERCENTAGE:.1f}"
+    )
+    if BANNER_IMAGE_URL:
+        try:
+            await callback.message.answer_photo(
+                photo=BANNER_IMAGE_URL,
+                caption=welcome_text,
+                reply_markup=get_start_reply_keyboard(is_admin=is_admin(user_id)),
+                parse_mode="HTML"
+            )
+            return
+        except Exception:
+            pass
+    await callback.message.answer(
+        welcome_text,
+        reply_markup=get_start_reply_keyboard(is_admin=is_admin(user_id)),
+        parse_mode="HTML"
+    )
+
+
+# ==========================================
+# USER INLINE BUTTON CALLBACKS
+# ==========================================
+
+@router.callback_query(F.data.in_(["exchange_inr_npr", "exchange_npr_inr"]))
+async def cb_start_exchange(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    user_id = callback.from_user.id
+    if is_user_banned(user_id):
+        await callback.message.answer(ERROR_MESSAGES["banned"])
+        return
+
+    can_exchange, wait_time = check_anti_spam(user_id)
+    if not can_exchange:
+        await callback.message.answer(
+            ERROR_MESSAGES["anti_spam"].format(wait_time=wait_time),
+            reply_markup=get_start_reply_keyboard(is_admin=is_admin(user_id))
+        )
+        return
+
+    exchange_type = "INR_TO_NPR" if callback.data == "exchange_inr_npr" else "NPR_TO_INR"
+    from_curr, to_curr = get_exchange_currencies(exchange_type)
+    rate = get_exchange_rate(exchange_type) or (DEFAULT_INR_TO_NPR_RATE if exchange_type == "INR_TO_NPR" else DEFAULT_NPR_TO_INR_RATE)
+
+    await state.update_data(exchange_type=exchange_type, rate=rate, from_curr=from_curr, to_curr=to_curr)
+    await state.set_state(ExchangeState.waiting_for_amount)
+
+    info_text = (
+        f"💱 <b>Direction: {get_exchange_type_display(exchange_type)}</b>\n\n"
+        f"<blockquote>"
+        f"• Current Rate: <b>1 {from_curr} = {rate:.4f} {to_curr}</b>\n"
+        f"• Service Fee: <b>{SERVICE_FEE_PERCENTAGE}%</b>"
+        f"</blockquote>\n\n"
+        f"{ENTER_AMOUNT}"
+    )
+
+    await callback.message.answer(
+        info_text,
+        reply_markup=get_quick_amount_reply_keyboard(from_curr),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("amt_"), ExchangeState.waiting_for_amount)
+async def cb_quick_amount(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    val_str = callback.data.replace("amt_", "")
+    valid, amount = validate_amount(val_str)
+    if not valid:
+        return
+    data = await state.get_data()
+    exchange_type = data["exchange_type"]
+    rate = data["rate"]
+    from_curr, to_curr = get_exchange_currencies(exchange_type)
+    final_amount, fee = calculate_exchange(amount, rate)
+
+    await state.update_data(
+        amount=amount,
+        final_amount=final_amount,
+        fee=fee,
+        from_curr=from_curr,
+        to_curr=to_curr
+    )
+    await state.set_state(ExchangeState.waiting_for_confirmation)
+
+    summary_text = EXCHANGE_SUMMARY.format(
+        exchange_type=get_exchange_type_display(exchange_type),
+        from_amount=f"{amount:,.2f}",
+        from_currency=from_curr,
+        to_amount=f"{final_amount:,.2f}",
+        to_currency=to_curr,
+        rate=f"{rate:.4f}",
+        fee=f"{fee:,.2f}",
+        fee_currency=to_curr
+    )
+    await callback.message.answer(
+        summary_text,
+        reply_markup=get_exchange_confirm_reply_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "confirm_exchange", ExchangeState.waiting_for_confirmation)
+async def cb_confirm_exchange(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    user_id = callback.from_user.id
+    data = await state.get_data()
+
+    amount = data["amount"]
+    from_curr = data["from_curr"]
+    upi_id, esewa_id = get_payment_details()
+
+    pay_text = PAYMENT_INSTRUCTIONS.format(
+        amount=f"{amount:,.2f}",
+        from_currency=from_curr,
+        upi_id=upi_id,
+        esewa_id=esewa_id,
+        user_id=user_id
+    )
+
+    await state.set_state(ExchangeState.waiting_for_payment)
+
+    if from_curr == "INR" and ENABLE_DYNAMIC_QR:
+        qr_url = get_upi_qr_url(upi_id, amount, f"Exchange User {user_id}")
+        try:
+            await callback.message.answer_photo(
+                photo=URLInputFile(qr_url),
+                caption=pay_text,
+                reply_markup=get_payment_reply_keyboard(),
+                parse_mode="HTML"
+            )
+            return
+        except Exception as e:
+            logger.warning("QR Code error: %s", e)
+
+    await callback.message.answer(
+        pay_text,
+        reply_markup=get_payment_reply_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "change_amount", ExchangeState.waiting_for_confirmation)
+async def cb_change_amount(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    from_curr = data.get("from_curr", "INR")
+    await state.set_state(ExchangeState.waiting_for_amount)
+    await callback.message.answer(
+        "🔄 Select or type a new amount:",
+        reply_markup=get_quick_amount_reply_keyboard(from_curr)
+    )
+
+
+@router.callback_query(F.data == "cancel_exchange")
+async def cb_cancel_exchange(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.answer("Exchange cancelled.")
+    await callback.message.answer(
+        "❌ Exchange cancelled.",
+        reply_markup=get_start_reply_keyboard(is_admin=is_admin(callback.from_user.id))
+    )
+
+
+@router.callback_query(F.data == "payment_done")
+async def cb_payment_done(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(ExchangeState.waiting_for_screenshot)
+    await callback.message.answer(
+        PAYMENT_VERIFICATION,
+        reply_markup=get_cancel_reply_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "cancel_payment")
+async def cb_cancel_payment(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.answer("Payment cancelled.")
+    await callback.message.answer(
+        "❌ Payment cancelled.",
+        reply_markup=get_start_reply_keyboard(is_admin=is_admin(callback.from_user.id))
+    )
+
+
+@router.callback_query(F.data == "btn_wallet")
+async def cb_btn_wallet(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+    user_info = get_user_info(user_id)
+    if not user_info:
+        await callback.message.answer("❌ User profile not found.")
+        return
+    text = WALLET_MENU.format(
+        wallet_inr=f"{user_info['wallet_inr']:,.2f}",
+        wallet_npr=f"{user_info['wallet_npr']:,.2f}",
+        total_exchanges=user_info["total_exchanges"],
+        total_volume=f"{user_info['total_volume']:,.2f}"
+    )
+    await callback.message.answer(text, reply_markup=get_cancel_reply_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "btn_calc")
+async def cb_btn_calc(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(CalcState.waiting_for_calc_input)
+    await callback.message.answer(
+        "🔢 <b>Instant Rate Calculator</b>\n\n"
+        "Send the amount you want to calculate (e.g. <code>5000</code> or <code>INR 5000</code> or <code>NPR 8000</code>):",
+        reply_markup=get_cancel_reply_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "btn_rates")
+async def cb_btn_rates(callback: CallbackQuery):
+    await callback.answer()
+    inr_to_npr = get_exchange_rate("INR_TO_NPR") or DEFAULT_INR_TO_NPR_RATE
+    npr_to_inr = get_exchange_rate("NPR_TO_INR") or DEFAULT_NPR_TO_INR_RATE
+    text = CURRENT_RATE.format(
+        inr_to_npr=f"{inr_to_npr:.4f}",
+        npr_to_inr=f"{npr_to_inr:.4f}",
+        fee=f"{SERVICE_FEE_PERCENTAGE:.1f}"
+    )
+    await callback.message.answer(text, reply_markup=get_cancel_reply_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "btn_history")
+async def cb_btn_history(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, exchange_type, amount, final_amount, status, created_at
+        FROM exchange_requests
+        WHERE user_id = ?
+        ORDER BY id DESC LIMIT 5
+    """, (user_id,))
+    orders = cursor.fetchall()
+    conn.close()
+    if not orders:
+        text = TRANSACTION_HISTORY.format(history="No transactions yet.")
+    else:
+        lines = []
+        for o in orders:
+            status_emoji = {"PENDING": "⏳", "APPROVED": "✅", "REJECTED": "❌"}.get(o[4], "❓")
+            lines.append(f"{status_emoji} <b>Order #{o[0]}</b>: {o[2]:,.2f} ➔ {o[3]:,.2f} ({o[4]})\n<i>{format_timestamp(o[5])}</i>")
+        text = TRANSACTION_HISTORY.format(history="\n\n".join(lines))
+    await callback.message.answer(text, reply_markup=get_cancel_reply_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "btn_deposit")
+async def cb_btn_deposit(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(
+        "📥 <b>Deposit Funds into Wallet</b>\n\nChoose currency to deposit:",
+        reply_markup=get_load_currency_reply_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.in_(["deposit_inr", "deposit_npr"]))
+async def cb_deposit_currency(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    currency = "INR" if "inr" in callback.data else "NPR"
+    await state.update_data(load_currency=currency)
+    await state.set_state(WalletState.waiting_for_load_amount)
+
+    symbol = "₹" if currency == "INR" else "₨"
+    await callback.message.answer(
+        f"📥 <b>Deposit {currency}</b>\n\n"
+        f"Limits: {symbol}100 – {symbol}100,000\n"
+        f"Type the amount to deposit:",
+        reply_markup=get_cancel_reply_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "btn_withdraw")
+async def cb_btn_withdraw(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    user_id = callback.from_user.id
+    user_info = get_user_info(user_id)
+    if not user_info:
+        await callback.message.answer("❌ Profile not found.")
+        return
+    await state.set_state(WalletState.waiting_for_withdraw_amount)
+    await callback.message.answer(
+        "💸 <b>Wallet Withdrawal</b>\n\n"
+        f"<blockquote>"
+        f"• Available INR: ₹{user_info['wallet_inr']:,.2f}\n"
+        f"• Available NPR: ₨{user_info['wallet_npr']:,.2f}"
+        f"</blockquote>\n\n"
+        "Enter currency and amount (e.g. <code>INR 2000</code> or <code>NPR 3000</code>):",
+        reply_markup=get_cancel_reply_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "btn_profile")
+async def cb_btn_profile(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+    user_info = get_user_info(user_id)
+    if not user_info:
+        await callback.message.answer("❌ Profile not found.")
+        return
+    ref_count = get_referred_users_count(user_id)
+    bot_info = await callback.bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_info['referral_code']}"
+    profile_text = PROFILE_MESSAGE.format(
+        user_id=user_id,
+        username=f"@{callback.from_user.username}" if callback.from_user.username else "N/A",
+        name=safe_html(callback.from_user.full_name),
+        joined_date=format_timestamp(user_info["joined_date"]),
+        wallet_inr=f"{user_info['wallet_inr']:,.2f}",
+        wallet_npr=f"{user_info['wallet_npr']:,.2f}",
+        total_exchanges=user_info["total_exchanges"],
+        total_volume=f"{user_info['total_volume']:,.2f}",
+        ref_count=ref_count,
+        ref_bonus=f"{REFERRAL_BONUS_PERCENT}%",
+        ref_link=ref_link
+    )
+    await callback.message.answer(profile_text, reply_markup=get_cancel_reply_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "btn_status")
+async def cb_btn_status(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, exchange_type, amount, final_amount, status, created_at
+        FROM exchange_requests
+        WHERE user_id = ?
+        ORDER BY id DESC LIMIT 1
+    """, (user_id,))
+    latest = cursor.fetchone()
+    conn.close()
+    if latest:
+        status_badge = {
+            "PENDING": "⏳ Under Review",
+            "APPROVED": "✅ Approved / Processing",
+            "COMPLETED": "🎉 Completed",
+            "REJECTED": "❌ Rejected",
+        }.get(latest[4], latest[4])
+        resp = (
+            f"🔍 <b>Latest Order: #{latest[0]}</b>\n\n"
+            f"<blockquote>"
+            f"• <b>Type:</b> {get_exchange_type_display(latest[1])}\n"
+            f"• <b>Amount:</b> <code>{latest[2]:,.2f}</code> ➔ <b>{latest[3]:,.2f}</b>\n"
+            f"• <b>Status:</b> <b>{status_badge}</b>\n"
+            f"• <b>Date:</b> <code>{format_timestamp(latest[5])}</code>"
+            f"</blockquote>\n\n"
+            f"<i>💡 To check any specific order: <code>/status &lt;Order_ID&gt;</code></i>"
+        )
+        await callback.message.answer(resp, reply_markup=get_cancel_reply_keyboard(), parse_mode="HTML")
+    else:
+        await callback.message.answer(
+            "🔍 <b>Order Status Tracker</b>\n\n"
+            "<blockquote>No recent orders found on your account.</blockquote>\n"
+            "<i>To track an order, send: <code>/status &lt;Order_ID&gt;</code></i>",
+            reply_markup=get_cancel_reply_keyboard(),
+            parse_mode="HTML"
+        )
+
+
+@router.callback_query(F.data == "btn_about")
+async def cb_btn_about(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(ABOUT_US_MESSAGE, reply_markup=get_cancel_reply_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "btn_help")
+async def cb_btn_help(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(HOW_IT_WORKS, reply_markup=get_cancel_reply_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "btn_support")
+async def cb_btn_support(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(CONTACT_US_MESSAGE, reply_markup=get_cancel_reply_keyboard(), parse_mode="HTML")
 
 
 # Admin Stats
