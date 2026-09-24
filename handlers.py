@@ -127,13 +127,6 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot):
         fee=f"{SERVICE_FEE_PERCENTAGE:.1f}"
     )
 
-    # Remove any cached reply keyboard from user screen
-    try:
-        cleanup = await message.answer("⚡", reply_markup=ReplyKeyboardRemove())
-        await cleanup.delete()
-    except Exception:
-        pass
-
     if BANNER_IMAGE_URL:
         try:
             await message.answer_photo(
@@ -1108,6 +1101,7 @@ async def cmd_order_status(message: Message):
 # ADMIN BACKOFFICE
 # ==========================================
 @router.message(Command("admin"))
+@router.message(F.text == "🛡️ Admin Panel")
 async def cmd_admin(message: Message):
     if not is_admin(message.from_user.id):
         await message.answer("🚫 Unauthorized: Admin access required.")
