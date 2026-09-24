@@ -1,41 +1,86 @@
 import re
+import math
+import html
+import urllib.parse
 from datetime import datetime, timedelta
 from database import get_db_connection
 from config import MIN_EXCHANGE_AMOUNT, MAX_EXCHANGE_AMOUNT, SERVICE_FEE_PERCENTAGE, ANTI_SPAM_LIMIT, ANTI_SPAM_WINDOW
 
 
+def safe_html(text) -> str:
+    """Escape dynamic user input to prevent Telegram HTML parse crashes."""
+    if text is None:
+        return ""
+    return html.escape(str(text))
+
+
 def validate_amount(amount_str):
-    """Validate exchange amount"""
+    """
+    Validate exchange amount.
+    Prevents negative numbers, NaN, Inf, and verifies min/max limits.
+    """
+    if not amount_str:
+        return False, "Please enter an amount."
     try:
-        amount = float(amount_str.strip().replace(",", ""))
+        clean_str = str(amount_str).strip().replace(",", "")
+        amount = float(clean_str)
+
+        # Check for NaN or Inf attacks
+        if math.isnan(amount) or math.isinf(amount):
+            return False, "Invalid number format."
+
+        if amount <= 0:
+            return False, "Amount must be greater than 0."
+
         if amount < MIN_EXCHANGE_AMOUNT:
-            return False, f"Amount is too low! Minimum is {MIN_EXCHANGE_AMOUNT}"
+            return False, f"Amount too low! Minimum allowed is ₹{MIN_EXCHANGE_AMOUNT:,.0f}."
+
         if amount > MAX_EXCHANGE_AMOUNT:
-            return False, f"Amount is too high! Maximum is {MAX_EXCHANGE_AMOUNT:,}"
-        return True, amount
-    except (ValueError, AttributeError):
-        return False, "Please enter a valid number"
+            return False, f"Amount too high! Maximum allowed is ₹{MAX_EXCHANGE_AMOUNT:,.0f}."
+
+        # Round to 2 decimal places
+        return True, round(amount, 2)
+    except (ValueError, TypeError, OverflowError):
+        return False, "Please enter a valid numeric amount (e.g. 5000)."
 
 
 def validate_transaction_id(txn_id):
-    """Validate transaction ID format"""
-    if not txn_id or len(txn_id) < 5 or len(txn_id) > 50:
+    """Validate bank UTR or eSewa transaction ID format."""
+    if not txn_id:
         return False
-    return bool(re.match(r'^[a-zA-Z0-9\-_/]+$', txn_id))
+    clean_id = str(txn_id).strip()
+    if len(clean_id) < 5 or len(clean_id) > 60:
+        return False
+    # Alphanumeric with common separators
+    return bool(re.match(r'^[a-zA-Z0-9\-_/.:]+$', clean_id))
 
 
 def calculate_exchange(amount, rate, apply_fee=True):
-    """Calculate exchange amount with fee"""
-    calculated = amount * rate
+    """Calculate exchange amount with precise rounding."""
+    calculated = round(amount * rate, 2)
     if apply_fee:
-        fee = calculated * (SERVICE_FEE_PERCENTAGE / 100)
-        final = calculated - fee
+        fee = round(calculated * (SERVICE_FEE_PERCENTAGE / 100.0), 2)
+        final = round(calculated - fee, 2)
         return calculated, fee, final
-    return calculated, 0, calculated
+    return calculated, 0.0, calculated
+
+
+def get_upi_qr_url(upi_id: str, amount: float, note: str = "Exchange") -> str:
+    """
+    Generate dynamic UPI QR Code image URL for instant scanning via GPay / PhonePe / Paytm.
+    Uses standard NPCI UPI Intent URI format.
+    """
+    clean_upi = upi_id.strip()
+    encoded_note = urllib.parse.quote(str(note).strip())
+    # Standard UPI URI: upi://pay?pa=...&pn=Exchanger&am=...&cu=INR&tn=...
+    upi_payload = f"upi://pay?pa={clean_upi}&pn=Exchanger&am={amount:.2f}&cu=INR&tn={encoded_note}"
+    encoded_payload = urllib.parse.quote(upi_payload)
+    # Generate clean 300x300 QR image via public high-speed QR CDN
+    return f"https://api.qrserver.com/v1/create-qr-code/?size=350x350&data={encoded_payload}&margin=10"
 
 
 def get_exchange_rate(exchange_type):
-    """Get current exchange rate from database"""
+    """Get current exchange rate from database."""
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -51,11 +96,14 @@ def get_exchange_rate(exchange_type):
     result = cursor.fetchone()
     conn.close()
 
-    return float(result[0]) if result else None
+    try:
+        return float(result[0]) if result else None
+    except (ValueError, TypeError):
+        return None
 
 
 def get_payment_details():
-    """Get current payment details from database"""
+    """Get current payment details from database."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -69,11 +117,14 @@ def get_payment_details():
     for setting in settings:
         details[setting[0]] = setting[1]
 
-    return details.get("upi_id", ""), details.get("esewa_id", "")
+    return details.get("upi_id", "business@upi"), details.get("esewa_id", "9801234567")
 
 
 def check_anti_spam(user_id):
-    """Check if user is making too many requests. Returns (can_exchange, wait_minutes)."""
+    """
+    Check if user is making too many requests.
+    Returns (can_exchange: bool, wait_minutes: int).
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -87,7 +138,6 @@ def check_anti_spam(user_id):
     conn.close()
 
     if count >= ANTI_SPAM_LIMIT:
-        # Estimate remaining wait in minutes (window / limit as rough spacing, at least 1 min)
         wait_minutes = max(1, int(ANTI_SPAM_WINDOW / 60 / ANTI_SPAM_LIMIT))
         return False, wait_minutes
 
@@ -95,7 +145,7 @@ def check_anti_spam(user_id):
 
 
 def is_user_banned(user_id):
-    """Check if user is banned"""
+    """Check if user is banned."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,))
@@ -105,11 +155,12 @@ def is_user_banned(user_id):
 
 
 def format_currency(amount, currency):
-    """Format currency display"""
+    """Format currency display with standard symbol and 2 decimal precision."""
     try:
         amount = float(amount or 0)
     except (TypeError, ValueError):
         amount = 0.0
+
     if currency == "INR":
         return f"₹{amount:,.2f}"
     elif currency == "NPR":
@@ -118,26 +169,26 @@ def format_currency(amount, currency):
 
 
 def format_timestamp(ts):
-    """Format timestamp to readable format. Handles None gracefully."""
+    """Format timestamp to readable format."""
     if ts is None:
         return "N/A"
     try:
         if isinstance(ts, str):
-            ts = datetime.fromisoformat(ts)
+            ts = datetime.fromisoformat(ts.replace(" ", "T"))
         return ts.strftime("%d/%m/%Y %H:%M")
     except Exception:
-        return str(ts)
+        return str(ts)[:16]
 
 
 def get_exchange_type_display(exchange_type):
-    """Get human-readable exchange type"""
+    """Get human-readable exchange type."""
     types = {
-        "INR_TO_NPR": "INR → NPR",
-        "NPR_TO_INR": "NPR → INR",
-        "LOAD_INR": "Load INR",
-        "LOAD_NPR": "Load NPR",
-        "WITHDRAW_INR": "Withdraw INR",
-        "WITHDRAW_NPR": "Withdraw NPR",
+        "INR_TO_NPR": "🇮🇳 INR → 🇳🇵 NPR",
+        "NPR_TO_INR": "🇳🇵 NPR → 🇮🇳 INR",
+        "LOAD_INR": "📥 Deposit INR",
+        "LOAD_NPR": "📥 Deposit NPR",
+        "WITHDRAW_INR": "💸 Withdraw INR",
+        "WITHDRAW_NPR": "💸 Withdraw NPR",
     }
     return types.get(exchange_type, exchange_type)
 
@@ -156,43 +207,35 @@ def get_exchange_currencies(exchange_type):
 
 
 def generate_referral_code(user_id):
-    """Generate unique referral code"""
+    """Generate unique and clean 8-character uppercase referral code."""
     import hashlib
-    code = hashlib.md5(f"{user_id}{datetime.now()}".encode()).hexdigest()[:8].upper()
+    seed = f"{user_id}_{datetime.now().timestamp()}"
+    code = hashlib.md5(seed.encode()).hexdigest()[:8].upper()
     return code
 
 
-def validate_user_exists(user_id):
-    """Check if user exists in database"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result is not None
-
-
 def mask_upi_id(upi_id):
-    """Mask UPI ID for privacy"""
-    parts = upi_id.split("@")
+    """Mask UPI ID for privacy (e.g. 98***@okhdfcbank)."""
+    parts = str(upi_id).split("@")
     if len(parts) == 2:
         user_part = parts[0]
         domain = parts[1]
-        if len(user_part) > 4:
-            user_part = user_part[:2] + "***" + user_part[-2:]
+        if len(user_part) > 3:
+            user_part = user_part[:2] + "***" + user_part[-1:]
         return f"{user_part}@{domain}"
-    return upi_id[:5] + "***"
+    return upi_id[:4] + "***"
 
 
 def mask_transaction_id(txn_id):
-    """Mask transaction ID for privacy"""
-    if len(txn_id) > 8:
-        return txn_id[:4] + "***" + txn_id[-4:]
-    return txn_id
+    """Mask transaction ID for privacy."""
+    txn_str = str(txn_id).strip()
+    if len(txn_str) > 8:
+        return txn_str[:4] + "****" + txn_str[-4:]
+    return txn_str
 
 
 def get_user_info(user_id):
-    """Get user information from database"""
+    """Get complete user information from database."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -206,14 +249,14 @@ def get_user_info(user_id):
     if result:
         return {
             "user_id": result[0],
-            "username": result[1],
-            "first_name": result[2],
-            "last_name": result[3],
+            "username": result[1] or "Unknown",
+            "first_name": result[2] or "User",
+            "last_name": result[3] or "",
             "joined_date": result[4],
-            "total_exchanges": result[5],
-            "total_amount": result[6],
-            "wallet_inr": result[7],
-            "wallet_npr": result[8],
-            "referral_code": result[9],
+            "total_exchanges": result[5] or 0,
+            "total_amount": result[6] or 0.0,
+            "wallet_inr": result[7] or 0.0,
+            "wallet_npr": result[8] or 0.0,
+            "referral_code": result[9] or "",
         }
     return None
