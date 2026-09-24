@@ -21,42 +21,46 @@ REJECT_REASONS = {
 # REGULAR REPLY KEYBOARDS (Bottom Screen)
 # ==========================================
 
-def get_start_reply_keyboard():
+def get_start_reply_keyboard(is_admin: bool = False):
     """
     Regular ReplyKeyboardMarkup persistent at bottom of user's screen.
     Includes Help, About, Contact, Home and all exchange/wallet services.
     """
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="🇮🇳 INR → 🇳🇵 NPR"),
-                KeyboardButton(text="🇳🇵 NPR → 🇮🇳 INR"),
-            ],
-            [
-                KeyboardButton(text="💼 My Wallet"),
-                KeyboardButton(text="🔢 Rate Calculator"),
-            ],
-            [
-                KeyboardButton(text="📊 Live Rates"),
-                KeyboardButton(text="📜 History"),
-            ],
-            [
-                KeyboardButton(text="📥 Deposit Funds"),
-                KeyboardButton(text="💸 Withdraw"),
-            ],
-            [
-                KeyboardButton(text="👤 Profile & Referrals"),
-                KeyboardButton(text="🔍 Order Status"),
-            ],
-            [
-                KeyboardButton(text="ℹ️ About Us"),
-                KeyboardButton(text="❓ Help Guide"),
-                KeyboardButton(text="📞 Contact Support"),
-            ],
-            [
-                KeyboardButton(text="🏠 Home Menu"),
-            ]
+    keyboard = [
+        [
+            KeyboardButton(text="🇮🇳 INR → 🇳🇵 NPR"),
+            KeyboardButton(text="🇳🇵 NPR → 🇮🇳 INR"),
         ],
+        [
+            KeyboardButton(text="💼 My Wallet"),
+            KeyboardButton(text="🔢 Rate Calculator"),
+        ],
+        [
+            KeyboardButton(text="📊 Live Rates"),
+            KeyboardButton(text="📜 History"),
+        ],
+        [
+            KeyboardButton(text="📥 Deposit Funds"),
+            KeyboardButton(text="💸 Withdraw"),
+        ],
+        [
+            KeyboardButton(text="👤 Profile & Referrals"),
+            KeyboardButton(text="🔍 Order Status"),
+        ],
+        [
+            KeyboardButton(text="ℹ️ About Us"),
+            KeyboardButton(text="❓ Help Guide"),
+            KeyboardButton(text="📞 Contact Support"),
+        ],
+        [
+            KeyboardButton(text="🏠 Home Menu"),
+        ]
+    ]
+    if is_admin:
+        keyboard.append([KeyboardButton(text="🛡️ Admin Panel")])
+
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
         resize_keyboard=True,
         persistent=True,
         input_field_placeholder="Select an option from the menu below..."
