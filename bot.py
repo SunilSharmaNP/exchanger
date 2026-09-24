@@ -74,6 +74,13 @@ async def main():
     # Setup menu commands
     await set_bot_commands(bot)
 
+    # Clear any active webhook so getUpdates polling doesn't encounter TelegramConflictError
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Active webhook removed and pending updates cleared.")
+    except Exception as e:
+        logger.warning("Could not delete webhook: %s", e)
+
     logger.info("Starting Exchanger Bot polling...")
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
